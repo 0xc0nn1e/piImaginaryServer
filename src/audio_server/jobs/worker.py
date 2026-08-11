@@ -325,9 +325,17 @@ def _load_worker_factory(path: str) -> WorkerFactory:
     return cast(WorkerFactory, factory)
 
 
+def _configure_child_logging() -> None:
+    """Configure logging in a spawned child, which inherits no root handlers."""
+
+    settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)
+
+
 def _worker_process_main(index: int, stop_event: StopEvent, factory_path: str) -> None:
     failed = False
     try:
+        _configure_child_logging()
         factory = _load_worker_factory(factory_path)
         worker = factory(index)
         worker.run(stop_event)
@@ -454,3 +462,7 @@ def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
     raise SystemExit(run_supervisor(worker_count=settings.processing_workers))
+
+
+if __name__ == "__main__":
+    main()

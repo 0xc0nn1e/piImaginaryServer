@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -23,6 +27,25 @@ from audio_server.jobs.queue import (
 )
 from audio_server.jobs.worker import Worker, WorkerIntervals
 from audio_server.processing.errors import ProviderConfigurationError
+
+
+def test_worker_module_invocation_calls_main() -> None:
+    environment = {
+        **os.environ,
+        "APP_ENV": "test",
+        "PROCESSING_WORKERS": "0",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-m", "audio_server.jobs.worker"],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize(
@@ -158,6 +181,53 @@ class _BoundaryFailureWorker:
         raise self._error
 
 
+def test_worker_child_configures_logging_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        worker_module,
+        "get_settings",
+        lambda: SimpleNamespace(log_level="WARNING", log_format="plain"),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "configure_logging",
+        lambda level, log_format: calls.append((level, log_format)),
+    )
+
+    worker_module._configure_child_logging()
+
+    assert calls == [("WARNING", "plain")]
+
+
+def test_worker_process_configures_logging_before_loading_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class SuccessfulWorker:
+        def run(self, stop_event: object) -> None:
+            del stop_event
+            events.append("run")
+
+    def load_factory(path: str):  # type: ignore[no-untyped-def]
+        del path
+        events.append("factory")
+        return lambda index: SuccessfulWorker()
+
+    monkeypatch.setattr(
+        worker_module,
+        "_configure_child_logging",
+        lambda: events.append("logging"),
+    )
+    monkeypatch.setattr(worker_module, "_load_worker_factory", load_factory)
+
+    worker_module._worker_process_main(2, threading.Event(), "unused:factory")
+
+    assert events == ["logging", "factory", "run"]
+
+
 def _error_with_secret_cause(error: Exception, secret: str) -> Exception:
     try:
         raise RuntimeError(secret)
@@ -193,6 +263,7 @@ def test_worker_process_boundary_redacts_exception_chain_and_exits_nonzero(
 ) -> None:
     secret = "SENTINEL_SECRET_MUST_NOT_APPEAR"
     failing_worker = _BoundaryFailureWorker(_error_with_secret_cause(error, secret))
+    monkeypatch.setattr(worker_module, "_configure_child_logging", lambda: None)
     monkeypatch.setattr(
         worker_module,
         "_load_worker_factory",
