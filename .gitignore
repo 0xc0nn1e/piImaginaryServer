@@ -1,0 +1,66 @@
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test, type-checker, linter, and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime logs and process files
+*.log
+*.pid
+
+# Databases and PostgreSQL development data
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+postgres-data/
+
+# Recordings, derived audio, staging files, and model caches
+data/
+recordings/
+work/
+staging/
+models/
+model-cache/
+.model-cache/
+.cache/huggingface/
+.cache/torch/
+*.wav
+*.flac
+*.m4a
+*.aac
+*.opus
+*.ogg
+*.webm
+*.mp3
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

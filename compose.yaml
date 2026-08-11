@@ -1,0 +1,127 @@
+x-runtime-environment: &runtime-environment
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-audio_server}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-audio_server}
+  STORAGE_PATH: /data
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-audio_server}
+      POSTGRES_USER: ${POSTGRES_USER:-audio_server}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "${POSTGRES_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: api
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-audio_server}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-audio_server}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      <<: *runtime-environment
+      DOCS_ENABLED: ${DOCS_ENABLED:-true}
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
+      MAX_METADATA_BYTES: ${MAX_METADATA_BYTES:-16384}
+      MAX_AUDIO_DURATION_SECONDS: ${MAX_AUDIO_DURATION_SECONDS:-21600}
+      FFMPEG_BINARY: ${FFMPEG_BINARY:-ffmpeg}
+      FFPROBE_BINARY: ${FFPROBE_BINARY:-ffprobe}
+      FFMPEG_TIMEOUT_SECONDS: ${FFMPEG_TIMEOUT_SECONDS:-3600}
+      PROCESSING_MAX_ATTEMPTS: ${PROCESSING_MAX_ATTEMPTS:-3}
+      AUDIO_RETENTION_DAYS: ${AUDIO_RETENTION_DAYS:-}
+      TRANSCRIPT_RETENTION_DAYS: ${TRANSCRIPT_RETENTION_DAYS:-}
+    ports:
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - recordings-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    init: true
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker
+      args:
+        PYTORCH_VERSION: ${PYTORCH_VERSION:-2.11.0}
+        TORCHCODEC_VERSION: ${TORCHCODEC_VERSION:-0.13.0}
+    environment:
+      <<: *runtime-environment
+      FFMPEG_BINARY: ${FFMPEG_BINARY:-ffmpeg}
+      FFPROBE_BINARY: ${FFPROBE_BINARY:-ffprobe}
+      FFMPEG_TIMEOUT_SECONDS: ${FFMPEG_TIMEOUT_SECONDS:-3600}
+      PROCESSING_WORKERS: ${PROCESSING_WORKERS:-1}
+      JOB_POLL_SECONDS: ${JOB_POLL_SECONDS:-1}
+      JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-30}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-300}
+      JOB_RECOVERY_SECONDS: ${JOB_RECOVERY_SECONDS:-30}
+      RETRY_BASE_SECONDS: ${RETRY_BASE_SECONDS:-30}
+      RETRY_MAX_SECONDS: ${RETRY_MAX_SECONDS:-900}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cpu}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+      WHISPER_CPU_THREADS: ${WHISPER_CPU_THREADS:-4}
+      WHISPER_CACHE_DIR: /models/huggingface
+      DIARIZATION_ENABLED: ${DIARIZATION_ENABLED:-true}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1}
+      DIARIZATION_DEVICE: ${DIARIZATION_DEVICE:-cpu}
+      HUGGINGFACE_TOKEN: ${HUGGINGFACE_TOKEN:-}
+      PYANNOTE_METRICS_ENABLED: "0"
+      HF_HOME: /models/huggingface
+      TORCH_HOME: /models/torch
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_PROVIDER: ${LLM_PROVIDER:-disabled}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - recordings-data:/data
+      - model-cache:/models
+    init: true
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  recordings-data:
+  model-cache:
