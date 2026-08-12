@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from audio_server.core.config import Settings
-from audio_server.main import _validate_api_token
+from audio_server.main import _validate_api_token, _validate_web_auth
 
 
 def test_settings_errors_hide_invalid_database_url_credentials() -> None:
@@ -38,3 +38,12 @@ def test_api_runtime_rejects_missing_or_short_token(
 
     with pytest.raises(ValueError, match="API_TOKEN"):
         _validate_api_token(settings)
+
+
+def test_production_web_origin_requires_https() -> None:
+    settings = Settings(app_env="production", web_allowed_origin="http://audio.example")
+    with pytest.raises(ValueError, match="WEB_ALLOWED_ORIGIN must use HTTPS"):
+        _validate_web_auth(settings)
+
+    settings = Settings(app_env="production", web_allowed_origin="https://audio.example")
+    _validate_web_auth(settings)

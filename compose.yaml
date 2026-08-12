@@ -52,6 +52,14 @@ services:
       PROCESSING_MAX_ATTEMPTS: ${PROCESSING_MAX_ATTEMPTS:-3}
       AUDIO_RETENTION_DAYS: ${AUDIO_RETENTION_DAYS:-}
       TRANSCRIPT_RETENTION_DAYS: ${TRANSCRIPT_RETENTION_DAYS:-}
+      WEB_SETUP_TOKEN: ${WEB_SETUP_TOKEN:-}
+      WEB_SESSION_HOURS: ${WEB_SESSION_HOURS:-12}
+      WEB_COOKIE_SECURE: ${WEB_COOKIE_SECURE:-false}
+      WEB_ALLOWED_ORIGIN: ${WEB_ALLOWED_ORIGIN:-http://127.0.0.1:3000}
+      WEB_AUTH_MAX_REQUEST_BYTES: ${WEB_AUTH_MAX_REQUEST_BYTES:-4096}
+      WEB_LOGIN_MAX_ATTEMPTS: ${WEB_LOGIN_MAX_ATTEMPTS:-5}
+      WEB_LOGIN_WINDOW_SECONDS: ${WEB_LOGIN_WINDOW_SECONDS:-300}
+      WEB_LOGIN_RATE_LIMIT_ENTRIES: ${WEB_LOGIN_RATE_LIMIT_ENTRIES:-2048}
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
     depends_on:
@@ -72,6 +80,32 @@ services:
       retries: 6
       start_period: 10s
     init: true
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "${WEB_BIND_HOST:-127.0.0.1}:${WEB_PORT:-3000}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
 
   worker:

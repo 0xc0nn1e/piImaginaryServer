@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePath, PurePosixPath
 from typing import BinaryIO
 
 from sqlalchemy import Select, select
+from sqlalchemy import delete as sql_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from audio_server.activity.repository import append_activity
 from audio_server.api.schemas import ClientRecordingMetadata
+from audio_server.db.activity_models import (
+    ProcessingActivity,
+    ProcessingActivityType,
+)
 from audio_server.db.models import (
     Analysis,
     JobStage,
@@ -28,9 +35,11 @@ from audio_server.processing.errors import (
     RetryableProcessingError,
 )
 from audio_server.services.storage import (
+    StagedDeletion,
     StagedUpload,
     StorageBackend,
     StorageConflictError,
+    StorageError,
     UploadTooLargeError,
     original_storage_key,
 )
@@ -229,6 +238,132 @@ class RecordingService:
             return analysis
 
     def retry(self, recording_id: uuid.UUID) -> ProcessingJob:
+        return self._enqueue_processing(
+            recording_id,
+            allowed_statuses=frozenset({RecordingStatus.FAILED}),
+            disallowed_code="recording_not_retryable",
+            disallowed_message="Only a failed recording can be retried.",
+        )
+
+    def reprocess(self, recording_id: uuid.UUID) -> ProcessingJob:
+        """Queue a fresh job while preserving the last good result until replacement."""
+
+        return self._enqueue_processing(
+            recording_id,
+            allowed_statuses=frozenset(
+                {
+                    RecordingStatus.COMPLETED,
+                    RecordingStatus.FAILED,
+                }
+            ),
+            disallowed_code="recording_not_reprocessable",
+            disallowed_message="Only a completed or failed recording can be reprocessed.",
+        )
+
+    def delete_recording(self, recording_id: uuid.UUID) -> None:
+        """Delete terminal recording data with a reversible local-file handoff."""
+
+        deletion: StagedDeletion | None = None
+        job_ids: list[uuid.UUID] = []
+        with self._session_factory() as session:
+            try:
+                recording = session.get(Recording, recording_id, with_for_update=True)
+                if recording is None:
+                    raise RecordingServiceError(
+                        "recording_not_found", "Recording was not found.", status_code=404
+                    )
+                active = session.scalar(
+                    select(ProcessingJob.id).where(
+                        ProcessingJob.recording_id == recording_id,
+                        ProcessingJob.status.in_([JobStatus.QUEUED, JobStatus.PROCESSING]),
+                    )
+                )
+                if active is not None:
+                    raise RecordingServiceError(
+                        "recording_delete_active",
+                        "A queued or processing recording cannot be deleted.",
+                        status_code=409,
+                    )
+                job_ids = list(
+                    session.scalars(
+                        select(ProcessingJob.id).where(ProcessingJob.recording_id == recording_id)
+                    )
+                )
+                deletion = self._storage.stage_delete(recording.storage_key)
+                session.execute(
+                    sql_delete(ProcessingActivity).where(
+                        ProcessingActivity.recording_id == recording_id
+                    )
+                )
+                session.execute(
+                    sql_delete(TranscriptSegment).where(
+                        TranscriptSegment.recording_id == recording_id
+                    )
+                )
+                session.execute(sql_delete(Analysis).where(Analysis.recording_id == recording_id))
+                session.execute(
+                    sql_delete(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+                )
+                session.execute(sql_delete(Recording).where(Recording.id == recording_id))
+                session.commit()
+            except RecordingServiceError:
+                session.rollback()
+                raise
+            except Exception as exc:
+                session.rollback()
+                if deletion is not None:
+                    try:
+                        self._storage.restore_staged_delete(deletion)
+                    except Exception as restore_exc:
+                        logger.error(
+                            "recording deletion rollback failed",
+                            extra={
+                                "recording_id": str(recording_id),
+                                "error_type": type(restore_exc).__name__,
+                            },
+                        )
+                        raise RecordingServiceError(
+                            "recording_delete_rollback_failed",
+                            "The recording could not be deleted safely.",
+                            status_code=500,
+                        ) from None
+                if isinstance(exc, StorageError):
+                    raise RecordingServiceError(
+                        "recording_storage_delete_failed",
+                        "The stored audio could not be prepared for deletion.",
+                        status_code=500,
+                    ) from None
+                raise
+
+        assert deletion is not None
+        cleanup_steps: tuple[tuple[str, Callable[[], None]], ...] = (
+            ("original", lambda: self._storage.finalize_staged_delete(deletion)),
+            ("workspaces", lambda: self._storage.delete_workspaces(job_ids)),
+        )
+        for cleanup_step, cleanup in cleanup_steps:
+            try:
+                cleanup()
+            except Exception as exc:
+                # The database no longer exposes the recording. Keep ordinary
+                # logs free of storage paths while surfacing private cleanup.
+                logger.error(
+                    "recording deletion cleanup failed",
+                    extra={
+                        "recording_id": str(recording_id),
+                        "cleanup_step": cleanup_step,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+        logger.info("recording deleted", extra={"recording_id": str(recording_id)})
+
+    def _enqueue_processing(
+        self,
+        recording_id: uuid.UUID,
+        *,
+        allowed_statuses: frozenset[RecordingStatus],
+        disallowed_code: str,
+        disallowed_message: str,
+    ) -> ProcessingJob:
         now = datetime.now(UTC)
         with self._session_factory.begin() as session:
             recording = session.get(Recording, recording_id, with_for_update=True)
@@ -236,10 +371,10 @@ class RecordingService:
                 raise RecordingServiceError(
                     "recording_not_found", "Recording was not found.", status_code=404
                 )
-            if recording.processing_status is not RecordingStatus.FAILED:
+            if recording.processing_status not in allowed_statuses:
                 raise RecordingServiceError(
-                    "recording_not_retryable",
-                    "Only a failed recording can be retried.",
+                    disallowed_code,
+                    disallowed_message,
                     status_code=409,
                 )
             active = session.scalar(
@@ -264,8 +399,19 @@ class RecordingService:
             recording.processing_status = RecordingStatus.QUEUED
             session.add(job)
             session.flush()
+            append_activity(
+                session,
+                recording_id=recording.id,
+                job_id=job.id,
+                event_type=ProcessingActivityType.MANUAL_RETRY_QUEUED,
+                job_status=JobStatus.QUEUED,
+                stage=JobStage.QUEUED,
+                attempt_count=0,
+                max_attempts=job.max_attempts,
+                occurred_at=now,
+            )
             logger.info(
-                "processing retry queued",
+                "processing reprocess queued",
                 extra={"recording_id": str(recording.id), "job_id": str(job.id)},
             )
             return job
@@ -416,6 +562,17 @@ class RecordingService:
             with self._session_factory.begin() as session:
                 session.add_all([recording, job])
                 session.flush()
+                append_activity(
+                    session,
+                    recording_id=recording.id,
+                    job_id=job.id,
+                    event_type=ProcessingActivityType.JOB_QUEUED,
+                    job_status=JobStatus.QUEUED,
+                    stage=JobStage.QUEUED,
+                    attempt_count=0,
+                    max_attempts=job.max_attempts,
+                    occurred_at=now,
+                )
         except IntegrityError:
             with self._session_factory() as session:
                 try:

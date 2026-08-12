@@ -19,6 +19,8 @@ from typing import Protocol, TypeAlias
 from sqlalchemy import Select, or_, select, update
 from sqlalchemy.orm import Session
 
+from audio_server.activity.repository import append_activity
+from audio_server.db.activity_models import ProcessingActivityType
 from audio_server.db.models import (
     JobStage,
     JobStatus,
@@ -171,6 +173,7 @@ def create_processing_job(
 
     if max_attempts < 1:
         raise ValueError("max_attempts must be positive")
+    queued_at = available_at or _utcnow()
 
     # Upload ingestion may just have added this recording; the shared session
     # factory disables autoflush, so make it visible before querying.
@@ -189,11 +192,22 @@ def create_processing_job(
         stage=JobStage.QUEUED,
         attempt_count=0,
         max_attempts=max_attempts,
-        available_at=available_at or _utcnow(),
+        available_at=queued_at,
     )
     recording.processing_status = RecordingStatus.QUEUED
     session.add(job)
     session.flush()
+    append_activity(
+        session,
+        recording_id=recording_id,
+        job_id=job.id,
+        event_type=ProcessingActivityType.JOB_QUEUED,
+        job_status=JobStatus.QUEUED,
+        stage=JobStage.QUEUED,
+        attempt_count=0,
+        max_attempts=max_attempts,
+        occurred_at=queued_at,
+    )
     return job
 
 
@@ -224,17 +238,29 @@ def retry_failed_recording(
 
     if max_attempts < 1:
         raise ValueError("max_attempts must be positive")
+    queued_at = available_at or _utcnow()
     job = ProcessingJob(
         recording_id=recording_id,
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
         attempt_count=0,
         max_attempts=max_attempts,
-        available_at=available_at or _utcnow(),
+        available_at=queued_at,
     )
     recording.processing_status = RecordingStatus.QUEUED
     session.add(job)
     session.flush()
+    append_activity(
+        session,
+        recording_id=recording_id,
+        job_id=job.id,
+        event_type=ProcessingActivityType.MANUAL_RETRY_QUEUED,
+        job_status=JobStatus.QUEUED,
+        stage=JobStage.QUEUED,
+        attempt_count=0,
+        max_attempts=max_attempts,
+        occurred_at=queued_at,
+    )
     return job
 
 
@@ -296,6 +322,17 @@ class JobQueue:
                 update(Recording)
                 .where(Recording.id == job.recording_id)
                 .values(processing_status=RecordingStatus.PROCESSING)
+            )
+            append_activity(
+                session,
+                recording_id=job.recording_id,
+                job_id=job.id,
+                event_type=ProcessingActivityType.PROCESSING_STARTED,
+                job_status=JobStatus.PROCESSING,
+                stage=JobStage.PREPROCESSING,
+                attempt_count=job.attempt_count,
+                max_attempts=job.max_attempts,
+                occurred_at=claimed_at,
             )
             claimed = ClaimedJob(
                 id=job.id,
@@ -361,6 +398,17 @@ class JobQueue:
             )
             if updated_id is None:
                 raise ClaimLostError("cannot update stage after losing the job lease")
+            append_activity(
+                session,
+                recording_id=claim.recording_id,
+                job_id=claim.id,
+                event_type=ProcessingActivityType.STAGE_STARTED,
+                job_status=JobStatus.PROCESSING,
+                stage=next_stage,
+                attempt_count=claim.attempt_count,
+                max_attempts=claim.max_attempts,
+                occurred_at=heartbeat_at,
+            )
 
     def complete(
         self,
@@ -386,6 +434,17 @@ class JobQueue:
                 update(Recording)
                 .where(Recording.id == job.recording_id)
                 .values(processing_status=RecordingStatus.COMPLETED)
+            )
+            append_activity(
+                session,
+                recording_id=job.recording_id,
+                job_id=job.id,
+                event_type=ProcessingActivityType.PROCESSING_COMPLETED,
+                job_status=JobStatus.COMPLETED,
+                stage=JobStage.COMPLETED,
+                attempt_count=job.attempt_count,
+                max_attempts=job.max_attempts,
+                occurred_at=completed_at,
             )
 
     def fail(
@@ -427,6 +486,22 @@ class JobQueue:
                     .where(Recording.id == job.recording_id)
                     .values(processing_status=RecordingStatus.QUEUED)
                 )
+                append_activity(
+                    session,
+                    recording_id=job.recording_id,
+                    job_id=job.id,
+                    event_type=ProcessingActivityType.RETRY_SCHEDULED,
+                    job_status=JobStatus.QUEUED,
+                    stage=failed_stage,
+                    attempt_count=job.attempt_count,
+                    max_attempts=job.max_attempts,
+                    occurred_at=failed_at,
+                    error_code=job.error_code,
+                    error_type=job.error_type,
+                    safe_message=job.error_message,
+                    retry_scheduled=True,
+                    next_attempt_at=job.available_at,
+                )
             else:
                 job.status = JobStatus.FAILED
                 job.finished_at = failed_at
@@ -434,6 +509,20 @@ class JobQueue:
                     update(Recording)
                     .where(Recording.id == job.recording_id)
                     .values(processing_status=RecordingStatus.FAILED)
+                )
+                append_activity(
+                    session,
+                    recording_id=job.recording_id,
+                    job_id=job.id,
+                    event_type=ProcessingActivityType.PROCESSING_FAILED,
+                    job_status=JobStatus.FAILED,
+                    stage=failed_stage,
+                    attempt_count=job.attempt_count,
+                    max_attempts=job.max_attempts,
+                    occurred_at=failed_at,
+                    error_code=job.error_code,
+                    error_type=job.error_type,
+                    safe_message=job.error_message,
                 )
         return will_retry
 
@@ -495,6 +584,22 @@ class JobQueue:
                     job.finished_at = recovered_at
                     recording_status = RecordingStatus.FAILED
                     failed += 1
+                append_activity(
+                    session,
+                    recording_id=job.recording_id,
+                    job_id=job.id,
+                    event_type=ProcessingActivityType.LEASE_RECOVERED,
+                    job_status=job.status,
+                    stage=failed_stage,
+                    attempt_count=job.attempt_count,
+                    max_attempts=job.max_attempts,
+                    occurred_at=recovered_at,
+                    error_code=job.error_code,
+                    error_type=job.error_type,
+                    safe_message=job.error_message,
+                    retry_scheduled=can_retry,
+                    next_attempt_at=job.available_at if can_retry else None,
+                )
                 session.execute(
                     update(Recording)
                     .where(Recording.id == job.recording_id)

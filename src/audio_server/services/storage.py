@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -38,6 +40,14 @@ class StoredObject:
     sha256: str
 
 
+@dataclass(frozen=True)
+class StagedDeletion:
+    """An original moved out of its public key until the DB transaction commits."""
+
+    key: str
+    quarantine_path: Path | None
+
+
 class StorageBackend(Protocol):
     def create_staged_upload(self, source: BinaryIO, *, max_bytes: int) -> StagedUpload: ...
 
@@ -51,6 +61,14 @@ class StorageBackend(Protocol):
 
     def delete(self, key: str) -> None: ...
 
+    def stage_delete(self, key: str) -> StagedDeletion: ...
+
+    def restore_staged_delete(self, deletion: StagedDeletion) -> None: ...
+
+    def finalize_staged_delete(self, deletion: StagedDeletion) -> None: ...
+
+    def delete_workspaces(self, job_ids: list[uuid.UUID]) -> None: ...
+
     def work_directory(self, job_id: uuid.UUID, claim_token: uuid.UUID) -> Path: ...
 
 
@@ -61,9 +79,15 @@ class LocalStorageBackend:
         self.root = root.resolve()
         root_was_missing = not self.root.exists()
         self.staging_root = self.root / "staging"
+        self.deletion_root = self.staging_root / "deletions"
         self.recordings_root = self.root / "recordings"
         self.work_root = self.root / "work"
-        for directory in (self.root, self.staging_root, self.recordings_root, self.work_root):
+        for directory in (
+            self.root,
+            self.staging_root,
+            self.recordings_root,
+            self.work_root,
+        ):
             self._ensure_private_directory(directory)
         if root_was_missing:
             self._fsync_directory(self.root.parent)
@@ -133,6 +157,56 @@ class LocalStorageBackend:
         path = self._resolve_key(key)
         path.unlink(missing_ok=True)
         self._fsync_directory(path.parent)
+
+    def stage_delete(self, key: str) -> StagedDeletion:
+        source = self._resolve_key(key)
+        try:
+            source_stat = source.lstat()
+        except FileNotFoundError:
+            return StagedDeletion(key=key, quarantine_path=None)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise StorageError("stored object is not a regular file")
+
+        self._ensure_private_directory(self.deletion_root)
+        quarantine_path = self.deletion_root / f"{uuid.uuid4()}.delete"
+        os.replace(source, quarantine_path)
+        self._set_private_file_mode(quarantine_path)
+        self._fsync_directory(source.parent)
+        self._fsync_directory(self.deletion_root)
+        return StagedDeletion(key=key, quarantine_path=quarantine_path)
+
+    def restore_staged_delete(self, deletion: StagedDeletion) -> None:
+        if deletion.quarantine_path is None:
+            return
+        destination = self._resolve_key(deletion.key)
+        self._ensure_private_directory(destination.parent)
+        try:
+            os.link(deletion.quarantine_path, destination)
+        except FileExistsError as exc:
+            raise StorageConflictError(
+                "cannot restore a deleted object over existing data"
+            ) from exc
+        deletion.quarantine_path.unlink()
+        self._fsync_directory(destination.parent)
+        self._fsync_directory(self.deletion_root)
+
+    def finalize_staged_delete(self, deletion: StagedDeletion) -> None:
+        if deletion.quarantine_path is None:
+            return
+        deletion.quarantine_path.unlink(missing_ok=True)
+        self._fsync_directory(self.deletion_root)
+
+    def delete_workspaces(self, job_ids: list[uuid.UUID]) -> None:
+        for job_id in job_ids:
+            path = self._resolve_key(f"work/{job_id}")
+            try:
+                if path.is_symlink():
+                    path.unlink()
+                else:
+                    shutil.rmtree(path, ignore_errors=False)
+            except FileNotFoundError:
+                continue
+            self._fsync_directory(self.work_root)
 
     def discard_staged(self, staged: StagedUpload) -> None:
         try:

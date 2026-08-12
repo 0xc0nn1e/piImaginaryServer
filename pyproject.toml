@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "alembic>=1.14,<2",
+  "argon2-cffi>=23.1,<26",
   "fastapi>=0.115,<1",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.6,<3",
@@ -34,6 +35,7 @@ dev = [
 [project.scripts]
 audio-server = "audio_server.main:run"
 audio-worker = "audio_server.jobs.worker:main"
+audio-web-reset-password = "audio_server.web_auth.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

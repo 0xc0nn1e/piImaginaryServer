@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from audio_server.api.activity import router as activity_router
 from audio_server.api.errors import register_error_handlers
 from audio_server.api.health import router as health_router
 from audio_server.api.middleware import MULTIPART_OVERHEAD_BYTES, ApiRequestGuardMiddleware
@@ -17,6 +18,11 @@ from audio_server.processing.audio import AudioProcessor, FFmpegSettings
 from audio_server.processing.contracts import AudioPreprocessor
 from audio_server.services.recording_service import RecordingService
 from audio_server.services.storage import LocalStorageBackend, StorageBackend
+from audio_server.web_auth import (
+    create_web_auth_service,
+    register_web_auth_error_handler,
+)
+from audio_server.web_auth import router as web_auth_router
 
 
 def create_app(
@@ -39,16 +45,21 @@ def create_app(
     )
     api_token = active_settings.api_token.get_secret_value()
     authenticator = TokenAuthenticator(api_token)
+    web_auth_service = create_web_auth_service(
+        active_settings,
+        active_database.session_factory,
+    )
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
         _validate_api_token(active_settings)
+        _validate_web_auth(active_settings)
         yield
 
     docs_url = "/docs" if active_settings.docs_enabled else None
     openapi_url = "/openapi.json" if active_settings.docs_enabled else None
     application = FastAPI(
-        title="Audio Processing Server",
+        title="Wave Archive API",
         version="0.1.0",
         docs_url=docs_url,
         redoc_url=None,
@@ -59,6 +70,7 @@ def create_app(
     application.state.database = active_database
     application.state.storage = active_storage
     application.state.authenticator = authenticator
+    application.state.web_auth_service = web_auth_service
     recording_service = RecordingService(
         session_factory=active_database.session_factory,
         storage=active_storage,
@@ -82,8 +94,11 @@ def create_app(
         ),
     )
     register_error_handlers(application)
+    register_web_auth_error_handler(application)
     application.include_router(health_router)
+    application.include_router(web_auth_router)
     application.include_router(recordings_router)
+    application.include_router(activity_router)
     return application
 
 
@@ -102,3 +117,8 @@ def _validate_api_token(settings: Settings) -> None:
         raise ValueError("API_TOKEN must be configured for the API service")
     if settings.app_env == "production" and len(token) < 32:
         raise ValueError("API_TOKEN must contain at least 32 characters in production")
+
+
+def _validate_web_auth(settings: Settings) -> None:
+    if settings.app_env == "production" and not settings.web_allowed_origin.startswith("https://"):
+        raise ValueError("WEB_ALLOWED_ORIGIN must use HTTPS in production")

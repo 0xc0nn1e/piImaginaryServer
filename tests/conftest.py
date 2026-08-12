@@ -24,6 +24,7 @@ from audio_server.processing.contracts import AudioProbe
 from audio_server.services.storage import LocalStorageBackend
 
 TEST_API_TOKEN = "test-token-that-is-long-enough-for-all-tests"
+TEST_WEB_SETUP_TOKEN = "test-web-setup-token-that-is-long-enough-for-tests"
 
 
 class FakeAudioProcessor:
@@ -65,6 +66,9 @@ def app_client(tmp_path: Path, session_factory: sessionmaker[Session]) -> Iterat
         database_url="sqlite+pysqlite:///:memory:",
         storage_path=tmp_path / "data",
         api_token=TEST_API_TOKEN,
+        web_setup_token=TEST_WEB_SETUP_TOKEN,
+        web_allowed_origin="http://testserver",
+        web_cookie_secure=False,
         diarization_enabled=False,
         docs_enabled=False,
     )

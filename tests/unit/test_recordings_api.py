@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from audio_server.api.schemas import ClientRecordingMetadata
+from audio_server.db.activity_models import ProcessingActivity
 from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
@@ -316,3 +317,182 @@ def test_failed_recording_can_be_retried(app_client: TestClient, wav_bytes: byte
             session.scalars(select(ProcessingJob).where(ProcessingJob.recording_id == recording_id))
         )
         assert len(jobs) == 2
+
+
+def test_completed_recording_can_be_reprocessed_without_dropping_old_transcript(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        old_job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and old_job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        old_job.status = JobStatus.COMPLETED
+        session.add(
+            TranscriptSegment(
+                recording_id=recording_id,
+                job_id=old_job.id,
+                sequence=0,
+                speaker_label="SPEAKER_00",
+                start_time=0.0,
+                end_time=1.0,
+                text="existing result",
+                language="en",
+                confidence=0.9,
+                has_overlap=False,
+            )
+        )
+
+    response = app_client.post(
+        f"/api/v1/recordings/{recording_id}/reprocess",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
+    with app_client.app.state.test_session_factory() as session:
+        recording = session.get(Recording, recording_id)
+        jobs = list(
+            session.scalars(select(ProcessingJob).where(ProcessingJob.recording_id == recording_id))
+        )
+        segments = list(
+            session.scalars(
+                select(TranscriptSegment).where(TranscriptSegment.recording_id == recording_id)
+            )
+        )
+        assert recording is not None
+        assert recording.processing_status is RecordingStatus.QUEUED
+        assert len(jobs) == 2
+        assert [segment.text for segment in segments] == ["existing result"]
+
+
+def test_active_recording_cannot_be_reprocessed_or_deleted(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+    reprocess = app_client.post(f"/api/v1/recordings/{recording_id}/reprocess", headers=auth)
+    deleted = app_client.delete(f"/api/v1/recordings/{recording_id}", headers=auth)
+
+    assert reprocess.status_code == 409
+    assert reprocess.json()["error"]["code"] == "recording_not_reprocessable"
+    assert deleted.status_code == 409
+    assert deleted.json()["error"]["code"] == "recording_delete_active"
+    with app_client.app.state.test_session_factory() as session:
+        recording = session.get(Recording, recording_id)
+        assert recording is not None
+        assert app_client.app.state.storage.exists(recording.storage_key)
+
+
+def test_delete_terminal_recording_removes_file_and_all_database_children(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        storage_key = recording.storage_key
+        job_id = job.id
+        recording.processing_status = RecordingStatus.FAILED
+        job.status = JobStatus.FAILED
+        session.add(
+            TranscriptSegment(
+                recording_id=recording_id,
+                job_id=job.id,
+                sequence=0,
+                speaker_label="SPEAKER_00",
+                start_time=0.0,
+                end_time=1.0,
+                text="private transcript",
+                language="en",
+                confidence=None,
+                has_overlap=False,
+            )
+        )
+        session.add(
+            Analysis(
+                recording_id=recording_id,
+                job_id=job.id,
+                provider="disabled",
+                schema_version="1",
+                status=AnalysisStatus.SKIPPED,
+                result=None,
+            )
+        )
+    work = app_client.app.state.storage.work_directory(job_id, uuid.uuid4())
+    (work / "processing.wav").write_bytes(b"derived audio")
+
+    response = app_client.delete(
+        f"/api/v1/recordings/{recording_id}",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+    )
+
+    assert response.status_code == 204
+    assert not app_client.app.state.storage.exists(storage_key)
+    assert not (app_client.app.state.storage.work_root / str(job_id)).exists()
+    with app_client.app.state.test_session_factory() as session:
+        assert session.get(Recording, recording_id) is None
+        assert (
+            session.scalar(select(ProcessingJob).where(ProcessingJob.recording_id == recording_id))
+            is None
+        )
+        assert (
+            session.scalar(
+                select(TranscriptSegment).where(TranscriptSegment.recording_id == recording_id)
+            )
+            is None
+        )
+        assert session.scalar(select(Analysis).where(Analysis.recording_id == recording_id)) is None
+        assert (
+            session.scalar(
+                select(ProcessingActivity).where(ProcessingActivity.recording_id == recording_id)
+            )
+            is None
+        )
+
+
+def test_delete_database_failure_restores_original_audio(
+    app_client: TestClient,
+    wav_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        storage_key = recording.storage_key
+        recording.processing_status = RecordingStatus.FAILED
+        job.status = JobStatus.FAILED
+
+    def fail_commit(_session: Session) -> None:
+        raise RuntimeError("synthetic database failure")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+    response = app_client.delete(
+        f"/api/v1/recordings/{recording_id}",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_server_error"
+    assert app_client.app.state.storage.exists(storage_key)
+    with app_client.app.state.test_session_factory() as session:
+        assert session.get(Recording, recording_id) is not None

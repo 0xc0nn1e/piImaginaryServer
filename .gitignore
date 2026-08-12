@@ -6,6 +6,10 @@ build/
 dist/
 *.egg-info/
 .eggs/
+web/node_modules/
+web/dist/
+web/coverage/
+*.tsbuildinfo
 
 # Virtual environments
 .venv/

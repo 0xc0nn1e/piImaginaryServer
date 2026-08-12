@@ -12,6 +12,10 @@ __pycache__
 *.egg-info
 build
 dist
+web/node_modules
+web/dist
+web/coverage
+*.tsbuildinfo
 
 .pytest_cache
 .mypy_cache

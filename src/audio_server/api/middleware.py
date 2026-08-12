@@ -6,6 +6,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from audio_server.core.security import TokenAuthenticator
+from audio_server.web_auth.router import PUBLIC_WEB_AUTH_PATHS
 
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ class ApiRequestGuardMiddleware:
             nonlocal response_started
             if message["type"] == "http.response.start":
                 response_started = True
+                headers = list(message.get("headers", []))
+                if not any(name.lower() == b"cache-control" for name, _value in headers):
+                    headers.append((b"cache-control", b"no-store"))
+                    message = {**message, "headers": headers}
             await send(message)
 
         try:
@@ -68,7 +73,15 @@ class ApiRequestGuardMiddleware:
                 )
 
     async def _handle_private_request(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if not self._is_authenticated(scope):
+        if (
+            _is_web_auth_path(scope)
+            or _is_browser_read(scope)
+            or _is_browser_recording_mutation(scope)
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        if not self._is_bearer_authenticated(scope):
             await _send_error(
                 scope,
                 receive,
@@ -102,7 +115,7 @@ class ApiRequestGuardMiddleware:
 
         await self._app(scope, limited_receive, send)
 
-    def _is_authenticated(self, scope: Scope) -> bool:
+    def _is_bearer_authenticated(self, scope: Scope) -> bool:
         values = [
             value.decode("latin-1")
             for name, value in scope.get("headers", ())
@@ -134,6 +147,30 @@ def _is_private_api(scope: Scope) -> bool:
 def _is_recording_upload(scope: Scope) -> bool:
     path = str(scope.get("path", "")).rstrip("/")
     return scope.get("method") == "POST" and path == "/api/v1/recordings"
+
+
+def _is_web_auth_path(scope: Scope) -> bool:
+    return str(scope.get("path", "")) in PUBLIC_WEB_AUTH_PATHS | {
+        "/api/v1/auth/me",
+        "/api/v1/auth/logout",
+    }
+
+
+def _is_browser_read(scope: Scope) -> bool:
+    path = str(scope.get("path", "")).rstrip("/")
+    return scope.get("method") in {"GET", "HEAD"} and (
+        path == "/api/v1/recordings" or path.startswith("/api/v1/recordings/")
+    )
+
+
+def _is_browser_recording_mutation(scope: Scope) -> bool:
+    path = str(scope.get("path", "")).rstrip("/")
+    parts = path.split("/")
+    if parts[:4] != ["", "api", "v1", "recordings"]:
+        return False
+    if scope.get("method") == "DELETE" and len(parts) == 5:
+        return True
+    return scope.get("method") == "POST" and len(parts) == 6 and parts[-1] == "reprocess"
 
 
 def _content_length(scope: Scope) -> int | None:

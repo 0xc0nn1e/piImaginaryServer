@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,15 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://audio:audio@localhost:5432/audio"
     storage_path: Path = Path("data")
     api_token: SecretStr = SecretStr("")
+
+    web_setup_token: SecretStr = SecretStr("")
+    web_allowed_origin: str = "http://127.0.0.1:8000"
+    web_session_hours: int = 12
+    web_cookie_secure: bool = False
+    web_auth_max_request_bytes: int = 4096
+    web_login_max_attempts: int = 5
+    web_login_window_seconds: int = 300
+    web_login_rate_limit_entries: int = 2048
 
     max_upload_bytes: int = 512 * 1024 * 1024
     max_audio_duration_seconds: float = 6 * 60 * 60
@@ -77,6 +87,30 @@ class Settings(BaseSettings):
             raise ValueError("LOG_LEVEL is invalid")
         return normalized
 
+    @field_validator("web_setup_token")
+    @classmethod
+    def validate_optional_web_setup_token(cls, value: SecretStr) -> SecretStr:
+        token = value.get_secret_value()
+        if token and len(token) < 32:
+            raise ValueError("WEB_SETUP_TOKEN must be empty or contain at least 32 characters")
+        return value
+
+    @field_validator("web_allowed_origin")
+    @classmethod
+    def validate_web_allowed_origin(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("WEB_ALLOWED_ORIGIN must be an exact HTTP(S) origin")
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
     @field_validator(
         "max_upload_bytes",
         "max_metadata_bytes",
@@ -89,6 +123,11 @@ class Settings(BaseSettings):
         "retry_max_seconds",
         "ffmpeg_timeout_seconds",
         "whisper_cpu_threads",
+        "web_session_hours",
+        "web_auth_max_request_bytes",
+        "web_login_max_attempts",
+        "web_login_window_seconds",
+        "web_login_rate_limit_entries",
     )
     @classmethod
     def positive_integer(cls, value: int) -> int:

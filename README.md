@@ -1,6 +1,6 @@
-# Audio Processing Server
+# Wave Archive
 
-Python 3 server-side backend for durable audio ingestion, speech-to-text,
+Private audio intelligence workspace and Python 3 server-side backend for durable audio ingestion, speech-to-text,
 speaker diarization, transcript merging, and optional analysis. The HTTP API is
 built with FastAPI; long-running AI work is performed by an independent worker
 and never blocks an upload request.
@@ -17,11 +17,11 @@ Raspberry Pi / iPhone / future client
                    │
                    │ authenticated multipart upload
                    ▼
-              FastAPI API
-          validation + metadata
-             │           │
+              FastAPI API ◀──────── Nginx web gateway
+          validation + metadata       React management UI
+             │           │            same-origin cookie auth
              │           └──────── PostgreSQL
-             │                    recordings + durable jobs
+             │                    recordings + jobs + web auth
              ▼                              │
  Local StorageBackend                       │ lease/claim
  original audio, unchanged                  ▼
@@ -70,6 +70,7 @@ The recommended development path is Docker Compose. It requires:
 A native installation requires:
 
 - Python 3.11
+- Node.js 22 for frontend development and production SPA builds
 - PostgreSQL 16 (older supported PostgreSQL versions may work but are not the
   tested Compose target)
 - `ffmpeg` and `ffprobe` on `PATH`
@@ -81,17 +82,20 @@ cache volume on first use.
 
 ## Docker quick start
 
-Create a private configuration file and generate two local secrets:
+Create a private configuration file and generate three local secrets:
 
 ```bash
 install -m 600 .env.example .env
 python3 -c 'import secrets; print(secrets.token_hex(32))'
 python3 -c 'import secrets; print(secrets.token_hex(24))'
+python3 -c 'import secrets; print(secrets.token_hex(32))'
 ```
 
-Put the first value in `API_TOKEN` and the second in `POSTGRES_PASSWORD` in
-`.env`. Do not commit `.env`. If diarization is enabled, also complete the
-[pyannote setup](#speaker-diarization) and set `HUGGINGFACE_TOKEN`.
+Put the first value in `API_TOKEN`, the second in `POSTGRES_PASSWORD`, and the
+third in `WEB_SETUP_TOKEN` in `.env`. The setup token authorizes only creation
+of the first web administrator. Do not commit `.env`. If diarization is
+enabled, also complete the [pyannote setup](#speaker-diarization) and set
+`HUGGINGFACE_TOKEN`.
 
 Start PostgreSQL, run Alembic, and start the API and one CPU worker:
 
@@ -99,12 +103,21 @@ Start PostgreSQL, run Alembic, and start the API and one CPU worker:
 docker compose up --build
 ```
 
-Compose exposes the API at `http://127.0.0.1:8000` and PostgreSQL at
-`127.0.0.1:5432` by default. `API_BIND_HOST` and `POSTGRES_BIND_HOST` control
-those published interfaces; keep both on loopback for local use. Production
-deployments should normally publish only the API to a trusted HTTPS ingress and
-should not publish PostgreSQL at all. The `migrate` service must finish
-successfully before the API or worker starts. Runtime state is kept in three
+Open `http://127.0.0.1:3000/setup`, create the administrator using the
+`WEB_SETUP_TOKEN` value, and then sign in at `/login`. Setup does not log in
+automatically. Afterwards, remove `WEB_SETUP_TOKEN` from `.env` and recreate
+the API container to disable the setup credential:
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+Compose exposes the web gateway at `http://127.0.0.1:3000`, the machine API at
+`http://127.0.0.1:8000`, and PostgreSQL at `127.0.0.1:5432` by default. Keep
+all published interfaces on loopback for local use. Production deployments
+should publish only the web gateway to a trusted HTTPS ingress and should not
+publish the API or PostgreSQL. The `migrate` service must finish successfully
+before the API, web gateway, or worker starts. Runtime state is kept in three
 named volumes:
 
 - `postgres-data`: database data
@@ -113,15 +126,16 @@ named volumes:
 
 Compose reads `.env` for variable interpolation but does not inject the whole
 file into every container. The migration service receives only its database
-URL, the API alone receives `API_TOKEN`, and the worker alone receives Hugging
-Face and LLM credentials. Named volumes are likewise scoped to the services
-that need them; the migration container cannot access recordings.
+URL, the API alone receives `API_TOKEN` and web-auth settings, and the worker
+alone receives Hugging Face and LLM credentials. The web container receives no
+runtime environment variables or secrets. Named volumes are likewise scoped to
+the services that need them; migration and web cannot access recordings.
 
 Useful operations:
 
 ```bash
 docker compose ps
-docker compose logs -f api worker
+docker compose logs -f web api worker
 docker compose run --rm migrate
 docker compose stop
 ```
@@ -172,6 +186,18 @@ The equivalent installed commands are `audio-server` and `audio-worker`.
 Application and worker processes must point to the same PostgreSQL database and
 storage root.
 
+For native frontend development, use Node.js 22 and run the API on port 8000:
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+Vite serves `http://127.0.0.1:5173` and proxies `/api` and `/health` to the API.
+Set `WEB_ALLOWED_ORIGIN=http://127.0.0.1:5173` while using it because setup,
+login, and logout require an exact Origin match.
+
 ## Configuration
 
 Settings are read from environment variables and, for local development, a
@@ -182,7 +208,14 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `APP_ENV` | `development` | Runtime environment; use a production value for deployment safety checks. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Application log level and `json` or `plain` output. |
 | `DOCS_ENABLED` | `true` | Enable OpenAPI schema and interactive documentation. |
-| `API_TOKEN` | empty | Bearer token required by all private endpoints. |
+| `API_TOKEN` | empty | Machine Bearer credential required for upload/retry and accepted for recording reads. |
+| `WEB_SETUP_TOKEN` | empty | One-time secret of at least 32 characters; leave empty after the first administrator exists. |
+| `WEB_SESSION_HOURS` | `12` | Lifetime of an opaque browser session. |
+| `WEB_COOKIE_SECURE` | `false` | Set `true` whenever the browser uses HTTPS. |
+| `WEB_ALLOWED_ORIGIN` | `http://127.0.0.1:3000` | Exact browser origin accepted for state-changing auth requests; no wildcard or path. |
+| `WEB_AUTH_MAX_REQUEST_BYTES` | `4096` | Total request-body cap for setup and login JSON. |
+| `WEB_LOGIN_MAX_ATTEMPTS` / `WEB_LOGIN_WINDOW_SECONDS` | `5` / `300` | Process-local failed-login limit and window. |
+| `WEB_LOGIN_RATE_LIMIT_ENTRIES` | `2048` | Bound on process-local login limiter keys. |
 | `DATABASE_URL` | local PostgreSQL URL | SQLAlchemy PostgreSQL URL used outside Compose. |
 | `STORAGE_PATH` | `./data` | Root for originals, work files, staging, and local model caches. |
 | `MAX_UPLOAD_BYTES` | `536870912` | Exact maximum number of bytes in the `audio` part, 512 MiB by default. |
@@ -214,11 +247,12 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `AUDIO_RETENTION_DAYS` / `TRANSCRIPT_RETENTION_DAYS` | blank/unset | Optional positive policy values; the MVP has no automatic cleanup worker. |
 
 The Compose-only variables `POSTGRES_DB`, `POSTGRES_USER`,
-`POSTGRES_PASSWORD`, `POSTGRES_BIND_HOST`, `POSTGRES_PORT`, `API_BIND_HOST`, and
-`API_PORT` configure its local services and published interfaces. Both bind
-hosts default to `127.0.0.1`. `PYTORCH_VERSION` and `TORCHCODEC_VERSION` are
-paired build arguments for the CPU worker. Use URL-safe PostgreSQL credentials
-because Compose constructs the internal `DATABASE_URL` from these values.
+`POSTGRES_PASSWORD`, `POSTGRES_BIND_HOST`, `POSTGRES_PORT`, `API_BIND_HOST`,
+`API_PORT`, `WEB_BIND_HOST`, and `WEB_PORT` configure its local services and
+published interfaces. All bind hosts default to `127.0.0.1`.
+`PYTORCH_VERSION` and `TORCHCODEC_VERSION` are paired build arguments for the
+CPU worker. Use URL-safe PostgreSQL credentials because Compose constructs the
+internal `DATABASE_URL` from these values.
 
 Before multipart parsing, the API enforces a total request-body guard derived
 as `MAX_UPLOAD_BYTES + MAX_METADATA_BYTES + 1 MiB` of multipart overhead. The
@@ -229,7 +263,24 @@ than an unbounded ingress buffer, remains the final validator.
 
 ## Authentication
 
-Every recording, status, transcript, retry, and analysis endpoint requires:
+The browser UI uses an opaque database-backed session. Login sets an HttpOnly
+`audio_server_session` cookie and a readable SameSite Strict
+`audio_server_csrf` cookie. The SPA reads the CSRF cookie only for logout,
+reprocessing, and deletion and echoes it in `X-CSRF-Token`; it never stores
+credentials in `localStorage` or `sessionStorage`. Setup requires the exact
+`WEB_ALLOWED_ORIGIN` plus the
+one-time `WEB_SETUP_TOKEN` in `X-Setup-Token`. Passwords and raw session tokens
+are not stored in plaintext.
+
+An authenticated browser session may read the recording list, metadata,
+status, transcript, analysis, and activity endpoints. Browser reprocessing and
+deletion additionally require the exact configured Origin and CSRF token.
+Bearer-authenticated machine clients may use the same mutation endpoints
+without browser CSRF headers. Upload and the legacy failed-job retry endpoint
+remain machine-Bearer-only. Browser upload and audio playback are deliberately
+absent from the UI.
+
+Raspberry Pi and other machine clients send:
 
 ```http
 Authorization: Bearer <API_TOKEN>
@@ -367,22 +418,71 @@ must inspect and quarantine repeatedly rejected client items.
 | --- | --- | --- |
 | `GET` | `/health/live` | Process liveness; no authentication. |
 | `GET` | `/health/ready` | Database/application readiness; no authentication. |
+| `GET` | `/api/v1/auth/setup-status` | Report whether first-admin setup is required and enabled. |
+| `POST` | `/api/v1/auth/setup` | Create the web administrator using `X-Setup-Token`. |
+| `POST` | `/api/v1/auth/login` | Validate credentials and create session/CSRF cookies. |
+| `GET` | `/api/v1/auth/me` | Return the current web administrator and session expiry. |
+| `POST` | `/api/v1/auth/logout` | Revoke the current session with CSRF validation. |
 | `POST` | `/api/v1/recordings` | Validate, durably store, enqueue, and return immediately. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/status` | Current recording and latest job stage/error state. |
+| `GET` | `/api/v1/recordings/{id}/activity` | Paginated, privacy-safe processing activity. |
 | `GET` | `/api/v1/recordings/{id}/transcript` | Ordered timestamped segments and formatted transcript. |
 | `POST` | `/api/v1/recordings/{id}/retry` | Create a new job for a terminal failed recording. |
+| `POST` | `/api/v1/recordings/{id}/reprocess` | Re-run a completed/failed recording; browser calls require Origin and CSRF. |
+| `DELETE` | `/api/v1/recordings/{id}` | Permanently delete a terminal recording and its private data. |
 | `GET` | `/api/v1/recordings/{id}/analysis` | Completed, skipped, or failed optional analysis. |
 
 List requests accept `limit` (default 50, maximum 100), `offset`, `device_id`,
 and `status`. Transcript or analysis requests made before the result is ready
 return a conflict response rather than partial data. A retry returns `202` only
 for a terminal failed recording; active or completed recordings cannot acquire
-a second active job.
+a second active job. Reprocessing accepts completed or failed recordings and
+preserves the last successful transcript until the replacement job commits.
+Deletion rejects queued or processing recordings with `409`; success returns
+`204` and permanently removes the original audio, transcript, analyses, jobs,
+and processing activity.
 
 Interactive OpenAPI documentation is available at `/docs` in environments
 where it is enabled.
+
+## Web management UI
+
+The React/TypeScript SPA is served by an unprivileged Nginx container. It has
+four browser routes:
+
+- `/setup`: one-time administrator creation
+- `/login`: administrator sign-in
+- `/recordings`: paginated and filterable recording list
+- `/recordings/{id}`: metadata, current stage, safe activity, transcript,
+  reprocessing, and confirmed permanent deletion
+
+The interface defaults to Japanese and can be switched to Hong Kong
+Traditional Chinese from the login, setup, desktop sidebar, or mobile header.
+Only this non-sensitive locale preference is stored in browser local storage;
+credentials, sessions, CSRF values, and API tokens are not stored there.
+
+Nginx serves the SPA and same-origin proxies `/api` and `/health` to FastAPI.
+The browser therefore needs no API hostname or secret at build or runtime.
+Active recordings poll status and activity every three seconds and stop when
+completed or failed. Transcript text is rendered as text, never injected as
+HTML; copying the full transcript requires an explicit button click.
+
+Build and test it independently with:
+
+```bash
+cd web
+npm ci
+npm run build
+npm test
+```
+
+The gateway adds a restrictive Content Security Policy, `Cache-Control:
+no-store`, frame denial, referrer suppression, MIME-sniffing protection, and no
+microphone/camera/geolocation permissions. It has a read-only root filesystem,
+drops Linux capabilities, and receives neither model/audio volumes nor
+application secrets.
 
 ## Storage layout
 
@@ -394,6 +494,7 @@ data/
   recordings/
     YYYY/MM/DD/<recording-uuid>/original.<detected-extension>
   staging/
+    deletions/                  # short-lived atomic deletion quarantine
   work/<job-uuid>/<claim-token>/processing.wav
   model-cache/
     huggingface/
@@ -403,6 +504,12 @@ data/
 The date is derived from the recording start time. Original bytes are flushed,
 atomically published without overwrite into their final directory, and never
 overwritten by ffmpeg.
+
+Terminal recording deletion first atomically moves the original into a private
+quarantine on the same filesystem. A database failure restores it; a successful
+database commit unlinks the quarantine and removes known derived job
+workspaces. This local-filesystem transaction boundary must be implemented with
+equivalent semantics by any future object-storage backend.
 Temporary normalized audio is mono, 16 kHz, signed 16-bit PCM and is only used
 for processing. Database rows store relative storage keys; APIs do not expose
 host absolute paths.
@@ -539,6 +646,11 @@ should run that step once under deployment control rather than letting every
 replica race migrations. Back up PostgreSQL and the recording store together
 before destructive schema or retention changes.
 
+Revision `0003_processing_activity` backfills lifecycle events from existing
+jobs and therefore requires an online database connection. Generating an
+offline SQL script across that revision intentionally fails rather than
+producing an incomplete activity history.
+
 Compose uses one PostgreSQL login for migrations and runtime access to keep the
 MVP easy to operate. A hardened production deployment should split the schema
 owner/migration role from a restricted API/worker runtime role and grant only
@@ -574,6 +686,8 @@ This service stores workplace conversations. Treat recordings, transcript
 segments, metadata, and analyses as private data.
 
 - Terminate HTTPS at a trusted reverse proxy or load balancer.
+- Set `WEB_COOKIE_SECURE=true` and `WEB_ALLOWED_ORIGIN` to the exact public
+  `https://` origin before making the UI available beyond localhost.
 - Enforce a reverse-proxy request-body cap matching or slightly exceeding the
   application's derived multipart cap; do not rely on ASGI validation as an
   excuse to buffer unlimited bodies at the ingress.
@@ -592,9 +706,10 @@ segments, metadata, and analyses as private data.
 - Do not implement cleanup that can remove an original for a queued,
   processing, or retryable failed job.
 
-The MVP provides a single shared API token, not user accounts or per-recording
-authorization. Encryption at rest, per-user access control, audit logging,
-formal retention enforcement, and key management are deployment roadmap work.
+The MVP provides one web administrator and a separate shared machine API token,
+not multi-user ownership or per-recording authorization. Encryption at rest,
+additional roles, a user-access audit log, formal retention enforcement, and
+key management are deployment roadmap work.
 
 ## Troubleshooting
 
@@ -614,6 +729,34 @@ docker compose logs postgres migrate api
 ```
 
 Do not start API replicas against an unapplied schema.
+
+If PostgreSQL reports `password authentication failed` while its log says that
+the database directory already exists, the named volume was initialized with a
+different password. Changing `POSTGRES_PASSWORD` in `.env` does not rotate an
+existing database role. Preserve the data by restoring the original password
+or rotating the role through an authorized database session. Recreate only the
+PostgreSQL volume when its contents are explicitly confirmed disposable; never
+use `docker compose down -v` as a generic migration fix because that also
+removes the recordings and model-cache volumes.
+
+### Web setup or login is rejected
+
+Confirm `WEB_ALLOWED_ORIGIN` exactly matches the URL shown in the browser,
+including scheme and port. `127.0.0.1` and `localhost` are different origins.
+Setup also requires a non-empty `WEB_SETUP_TOKEN` of at least 32 characters.
+After an administrator exists, an empty setup token is the safer normal state.
+If the browser uses HTTPS, set `WEB_COOKIE_SECURE=true`; do not set it for plain
+HTTP local development because browsers will not return Secure cookies over
+HTTP.
+
+### Using the web UI on a private LAN
+
+Do not expose plain HTTP authentication to the LAN. Put the web service behind
+a trusted HTTPS reverse proxy, publish only that proxy, configure a valid
+certificate, set `WEB_ALLOWED_ORIGIN` to its exact HTTPS origin, and enable
+`WEB_COOKIE_SECURE`. Keep ports 8000 and 5432 on loopback or remove their host
+publishing. Firewall access to trusted devices and use a VPN where possible;
+`WEB_BIND_HOST=0.0.0.0` alone does not provide transport security.
 
 ### Upload is rejected
 
@@ -646,7 +789,9 @@ the API and PostgreSQL do not require GPU access.
 Current deliberate limitations:
 
 - local filesystem storage only
-- one shared Bearer token and no user ownership model
+- one web administrator plus one shared machine Bearer token; no user ownership model
+- login rate limiting is process-local and assumes one API instance
+- no cleanup job yet for expired or revoked browser sessions
 - PostgreSQL at-least-once queue and restart-from-original retries
 - CPU-only supplied worker image
 - anonymous, exclusive speaker labels rather than real-person identification
@@ -656,15 +801,18 @@ Current deliberate limitations:
 - no job-aware janitor for staging/work artifacts left by hard process or host
   crashes
 - one PostgreSQL owner/runtime role in the supplied Compose stack
-- no frontend, full-text search, embeddings, vector database, or RAG
+- management UI has reprocessing and permanent deletion, but no upload,
+  playback, search, transcript editing, or analysis controls
+- no full-text search, embeddings, vector database, or RAG
 - the separate Pi client currently retries permanent non-2xx failures
 
 Likely next steps, after ingestion and transcript durability are proven:
 
 1. Add a shared object-storage backend for multi-host deployments.
 2. Publish and verify an NVIDIA worker image/profile.
-3. Add user authentication, per-recording authorization, audit logs, encryption
-   at rest, and tested retention cleanup.
+3. Add multi-user roles, per-recording authorization, access auditing,
+   distributed login throttling, session cleanup, encryption at rest, and
+   tested retention cleanup.
 4. Improve overlap attribution and add optional speaker identity mappings with
    explicit consent.
 5. Add a real optional analysis provider and versioned result schemas.

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Wave Archive">
+  <defs>
+    <linearGradient id="bg" x1="8" y1="7" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6e35a4"/>
+      <stop offset="0.58" stop-color="#a153e6"/>
+      <stop offset="1" stop-color="#cf8dff"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="15" y1="9" x2="46" y2="53" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".28"/>
+      <stop offset=".48" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="17" fill="url(#bg)"/>
+  <rect x="3.5" y="3.5" width="57" height="57" rx="16.5" fill="none" stroke="#fff" stroke-opacity=".16"/>
+  <path d="M4 20C18 7 37 7 60 20V4H4v16Z" fill="url(#shine)"/>
+  <g fill="#fff">
+    <rect x="19" y="27" width="3.5" height="10" rx="1.75"/>
+    <rect x="25" y="21" width="3.5" height="22" rx="1.75"/>
+    <rect x="31" y="15" width="3.5" height="34" rx="1.75"/>
+    <rect x="37" y="21" width="3.5" height="22" rx="1.75"/>
+    <rect x="43" y="27" width="3.5" height="10" rx="1.75"/>
+  </g>
+</svg>

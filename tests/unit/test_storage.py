@@ -140,3 +140,43 @@ def test_new_recording_directory_chain_is_fsynced(
         if current == storage.root:
             break
         current = current.parent
+
+
+def test_staged_delete_can_be_restored_or_finalized(tmp_path: Path) -> None:
+    storage = LocalStorageBackend(tmp_path / "data")
+    key = original_storage_key(
+        uuid.UUID("b7c53889-f3f0-4ae5-9e00-b329efe61176"),
+        datetime(2026, 8, 10, tzinfo=UTC),
+        ".wav",
+    )
+    first = storage.create_staged_upload(io.BytesIO(b"private-audio"), max_bytes=100)
+    storage.put_original(first, key)
+
+    deletion = storage.stage_delete(key)
+    assert not storage.exists(key)
+    assert deletion.quarantine_path is not None
+    assert deletion.quarantine_path.read_bytes() == b"private-audio"
+
+    storage.restore_staged_delete(deletion)
+    assert storage.exists(key)
+    second_deletion = storage.stage_delete(key)
+    storage.finalize_staged_delete(second_deletion)
+
+    assert not storage.exists(key)
+    assert second_deletion.quarantine_path is not None
+    assert not second_deletion.quarantine_path.exists()
+
+
+def test_delete_workspaces_removes_only_explicit_job_directories(tmp_path: Path) -> None:
+    storage = LocalStorageBackend(tmp_path / "data")
+    deleted_job_id = uuid.uuid4()
+    retained_job_id = uuid.uuid4()
+    deleted_work = storage.work_directory(deleted_job_id, uuid.uuid4())
+    retained_work = storage.work_directory(retained_job_id, uuid.uuid4())
+    (deleted_work / "processing.wav").write_bytes(b"derived")
+    (retained_work / "processing.wav").write_bytes(b"retained")
+
+    storage.delete_workspaces([deleted_job_id])
+
+    assert not (storage.work_root / str(deleted_job_id)).exists()
+    assert retained_work.is_dir()

@@ -6,7 +6,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile
 from pydantic import ValidationError
 
-from audio_server.api.dependencies import get_recording_service, require_principal
+from audio_server.api.dependencies import (
+    get_recording_service,
+    require_machine_principal,
+    require_mutation_principal,
+    require_principal,
+)
 from audio_server.api.schemas import (
     AnalysisResponse,
     ClientRecordingMetadata,
@@ -39,6 +44,7 @@ def upload_recording(
     idempotency_key: Annotated[uuid.UUID, Header(alias="Idempotency-Key")],
     device_id: Annotated[str, Header(alias="X-Device-ID")],
     content_sha256: Annotated[str, Header(alias="X-Content-SHA256")],
+    _machine_principal: Annotated[object, Depends(require_machine_principal)],
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> UploadRecordingResponse:
     if len(metadata.encode("utf-8")) > service_max_metadata_bytes(service):
@@ -181,10 +187,31 @@ def get_analysis(
 @router.post("/{recording_id}/retry", response_model=RetryResponse, status_code=202)
 def retry_recording(
     recording_id: uuid.UUID,
+    _machine_principal: Annotated[object, Depends(require_machine_principal)],
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> RetryResponse:
     job = service.retry(recording_id)
     return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.post("/{recording_id}/reprocess", response_model=RetryResponse, status_code=202)
+def reprocess_recording(
+    recording_id: uuid.UUID,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> RetryResponse:
+    job = service.reprocess(recording_id)
+    return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.delete("/{recording_id}", status_code=204)
+def delete_recording(
+    recording_id: uuid.UUID,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> Response:
+    service.delete_recording(recording_id)
+    return Response(status_code=204)
 
 
 def service_max_metadata_bytes(service: RecordingService) -> int:

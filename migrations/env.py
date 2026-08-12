@@ -6,7 +6,8 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from audio_server.core.config import get_settings
-from audio_server.db.models import Base
+from audio_server.db import Base
+from audio_server.web_auth.models import User, WebSession  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

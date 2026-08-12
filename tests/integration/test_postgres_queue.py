@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
@@ -41,9 +42,13 @@ def postgres_factory() -> Iterator[sessionmaker[Session]]:
         pytest.skip("queue integration tests require postgresql+psycopg")
 
     schema = f"queue_test_{uuid.uuid4().hex}"
-    admin_engine = create_engine(database_url, pool_pre_ping=True)
-    with admin_engine.begin() as connection:
-        connection.execute(CreateSchema(schema))
+    admin_engine = create_engine(database_url, pool_pre_ping=True, hide_parameters=True)
+    try:
+        with admin_engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+    except SQLAlchemyError:
+        admin_engine.dispose()
+        pytest.fail("PostgreSQL integration database is unavailable.", pytrace=False)
 
     engine: Engine | None = None
     try:
@@ -59,9 +64,13 @@ def postgres_factory() -> Iterator[sessionmaker[Session]]:
     finally:
         if engine is not None:
             engine.dispose()
-        with admin_engine.begin() as connection:
-            connection.execute(DropSchema(schema, cascade=True))
-        admin_engine.dispose()
+        try:
+            with admin_engine.begin() as connection:
+                connection.execute(DropSchema(schema, cascade=True))
+        except SQLAlchemyError:
+            pytest.fail("PostgreSQL integration cleanup failed.", pytrace=False)
+        finally:
+            admin_engine.dispose()
 
 
 @pytest.fixture

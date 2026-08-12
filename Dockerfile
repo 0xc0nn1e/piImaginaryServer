@@ -72,3 +72,22 @@ COPY --from=ai-builder /opt/venv /opt/venv
 ENV PYANNOTE_METRICS_ENABLED=0
 
 CMD ["python", "-m", "audio_server.jobs.worker"]
+
+
+FROM node:22-alpine AS web-builder
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+RUN npm run build
+
+
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine AS web
+
+COPY --chown=nginx:nginx web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=web-builder --chown=nginx:nginx /web/dist/ /usr/share/nginx/html/
+
+EXPOSE 8080

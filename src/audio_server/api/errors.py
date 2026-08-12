@@ -22,7 +22,11 @@ def register_error_handlers(app: FastAPI) -> None:
     async def authentication_error_handler(
         _request: Request, _exc: AuthenticationError
     ) -> JSONResponse:
-        return _error_response(401, "authentication_required", "A valid bearer token is required.")
+        return _error_response(
+            401,
+            "authentication_required",
+            "A valid API credential or web session is required.",
+        )
 
     @app.exception_handler(RecordingServiceError)
     async def recording_error_handler(
