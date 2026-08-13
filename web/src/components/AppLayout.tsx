@@ -1,15 +1,63 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
 import { useI18n } from "../i18n";
 import { LanguageSwitch } from "./LanguageSwitch";
 
+type HealthState = "checking" | "ok" | "fail";
+
+const SHOW_HEALTH = import.meta.env.VITE_SHOW_HEALTH !== "false";
+const HEALTHY_POLL_INTERVAL_MS = 180_000;
+const FAILED_POLL_INTERVAL_MS = 5_000;
+
 export function AppLayout() {
   const { user, logout } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
   const [logoutError, setLogoutError] = useState(false);
+  const [health, setHealth] = useState<HealthState>("checking");
+
+  useEffect(() => {
+    if (!SHOW_HEALTH) return;
+
+    let stopped = false;
+    let timeoutId: number | undefined;
+    let controller: AbortController | undefined;
+
+    const checkHealth = async () => {
+      let ok = false;
+      controller = new AbortController();
+      try {
+        const response = await fetch("/health/ready", {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        const payload = (await response.json()) as { status?: string };
+        ok = response.ok && payload.status === "ready";
+        if (!stopped) setHealth(ok ? "ok" : "fail");
+      } catch {
+        if (!stopped) setHealth("fail");
+      }
+      if (!stopped) {
+        timeoutId = window.setTimeout(
+          () => void checkHealth(),
+          ok ? HEALTHY_POLL_INTERVAL_MS : FAILED_POLL_INTERVAL_MS,
+        );
+      }
+    };
+
+    void checkHealth();
+    return () => {
+      stopped = true;
+      controller?.abort();
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, []);
+
+  const healthLabel = t(`health.${health}`);
 
   async function handleLogout() {
     try {
@@ -51,13 +99,20 @@ export function AppLayout() {
           </NavLink>
         </nav>
         <LanguageSwitch />
-        <div className="sidebar-status" aria-label={t("nav.serviceStatus")}>
-          <span className="online-dot" aria-hidden="true" />
-          <span>
-            {t("nav.privateServer")}
-            <small>{t("nav.localWorkspace")}</small>
-          </span>
-        </div>
+        {SHOW_HEALTH ? (
+          <div
+            aria-label={t("nav.serviceStatus")}
+            aria-live="polite"
+            className="sidebar-status"
+            role="status"
+          >
+            <span className={`health-dot health-${health}`} aria-hidden="true" />
+            <span>
+              {t("nav.privateServer")}
+              <small>{healthLabel}</small>
+            </span>
+          </div>
+        ) : null}
         <div className="account-menu">
           <span className="account-avatar" aria-hidden="true">
             {user?.username?.slice(0, 1).toUpperCase() ?? "A"}
@@ -105,7 +160,15 @@ export function AppLayout() {
         </main>
         <footer className="footer">
           <span>{t("footer.tagline")}</span>
-          <span>{t("footer.privacy")}</span>
+          <span className="footer-meta">
+            <span>{t("footer.privacy")}</span>
+            {SHOW_HEALTH ? (
+              <span className="footer-health">
+                <span className={`health-dot health-${health}`} aria-hidden="true" />
+                {t("health.backend")}: {healthLabel}
+              </span>
+            ) : null}
+          </span>
         </footer>
       </div>
     </div>

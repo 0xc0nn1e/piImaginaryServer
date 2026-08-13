@@ -20,6 +20,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   window.history.replaceState({}, "", "/");
 });
 
@@ -120,6 +121,70 @@ describe("application routes", () => {
     expect(await screen.findByText("<img src=x onerror=alert(1)>.flac")).toBeInTheDocument();
     expect(container.querySelector("img")).not.toBeInTheDocument();
     expect(container.querySelector(".status-badge")).toHaveTextContent("已完成");
+  });
+
+  it("polls readiness and displays the real backend health", async () => {
+    window.history.replaceState({}, "", "/recordings");
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return Promise.resolve(jsonResponse({ setup_required: false, setup_enabled: false }));
+      }
+      if (path === "/api/v1/auth/me") {
+        return Promise.resolve(jsonResponse({ user, expires_at: "2026-08-12T08:00:00Z" }));
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        return Promise.resolve(jsonResponse({ items: [], limit: 20, offset: 0 }));
+      }
+      if (path === "/health/ready") {
+        return Promise.resolve(jsonResponse({ status: "ready" }));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByText("連線正常", { selector: ".sidebar-status small" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/health/ready",
+      expect.objectContaining({ cache: "no-store", credentials: "same-origin" }),
+    );
+    expect(screen.getByLabelText("服務狀態").querySelector(".health-ok")).not.toBeNull();
+    expect(screen.getByText("後端: 連線正常")).toBeInTheDocument();
+  });
+
+  it("shows a failed health state and retries after five seconds", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState({}, "", "/recordings");
+    let healthChecks = 0;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return Promise.resolve(jsonResponse({ setup_required: false, setup_enabled: false }));
+      }
+      if (path === "/api/v1/auth/me") {
+        return Promise.resolve(jsonResponse({ user, expires_at: "2026-08-12T08:00:00Z" }));
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        return Promise.resolve(jsonResponse({ items: [], limit: 20, offset: 0 }));
+      }
+      if (path === "/health/ready") {
+        healthChecks += 1;
+        return Promise.resolve(jsonResponse({ status: "unavailable" }, 503));
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await vi.waitFor(() => expect(healthChecks).toBe(1));
+    expect(screen.getByText("連線失敗", { selector: ".sidebar-status small" })).toBeInTheDocument();
+    expect(screen.getByLabelText("服務狀態").querySelector(".health-fail")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(healthChecks).toBe(2);
   });
 
   it("uploads multiple audio files strictly in order and continues after one failure", async () => {

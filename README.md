@@ -478,6 +478,11 @@ credentials, sessions, CSRF values, and API tokens are not stored there.
 
 Nginx serves the SPA and same-origin proxies `/api` and `/health` to FastAPI.
 The browser therefore needs no API hostname or secret at build or runtime.
+As in the companion llm-ocr app, the authenticated layout polls backend health
+immediately, then every three minutes while ready or every five seconds after a
+failure. It uses `/health/ready`, so the indicator covers both FastAPI and its
+PostgreSQL dependency. Set `VITE_SHOW_HEALTH=false` before building the web
+image to hide the indicator and disable browser health polling.
 Active recordings and analysis-only jobs poll every three seconds. Transcript
 and LLM output are rendered as plain text, never injected as HTML. Transcript
 and analysis saves use optimistic revisions so two tabs cannot silently

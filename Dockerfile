@@ -78,6 +78,9 @@ FROM node:22-alpine AS web-builder
 
 WORKDIR /web
 
+ARG VITE_SHOW_HEALTH=true
+ENV VITE_SHOW_HEALTH=$VITE_SHOW_HEALTH
+
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 

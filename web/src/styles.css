@@ -708,13 +708,23 @@ h3,
   font-size: 0.49rem;
 }
 
-.online-dot {
+.health-dot {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
+  background: #696873;
+  box-shadow: 0 0 0 4px rgb(105 104 115 / 10%);
+}
+
+.health-dot.health-ok {
   background: var(--mint);
   box-shadow: 0 0 0 4px var(--mint-soft), 0 0 14px rgb(112 227 193 / 40%);
+}
+
+.health-dot.health-fail {
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgb(255 111 125 / 10%), 0 0 14px rgb(255 111 125 / 30%);
 }
 
 .account-menu {
@@ -803,6 +813,18 @@ h3,
   font-size: 0.53rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.footer-meta,
+.footer-health {
+  display: inline-flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.footer-health {
+  gap: 8px;
+  color: #777681;
 }
 
 .page-stack {
@@ -2085,6 +2107,12 @@ select {
     display: grid;
     gap: 6px;
     padding: 20px;
+  }
+
+  .footer-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .page-heading,
