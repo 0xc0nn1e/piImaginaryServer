@@ -141,6 +141,7 @@ export interface BilingualTag extends BilingualText {}
 export interface NaturalExpression {
   segment_sequence: number;
   start_time: number;
+  end_time: number | null;
   speaker_label: string;
   original_ja: string;
   translation_zh_hk: string;
@@ -151,6 +152,7 @@ export interface NaturalExpression {
 export interface AnalysisHighlight {
   segment_sequence: number;
   start_time: number;
+  end_time: number | null;
   speaker_label: string;
   original_ja: string;
   translation_zh_hk: string;
@@ -160,6 +162,7 @@ export interface AnalysisHighlight {
 
 export interface AnalysisResultV2 {
   description: BilingualText;
+  summary: BilingualText | null;
   tags: BilingualTag[];
   natural_expressions: NaturalExpression[];
   highlights: AnalysisHighlight[];

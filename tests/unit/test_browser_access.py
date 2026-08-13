@@ -57,6 +57,11 @@ def test_browser_session_can_read_recordings_but_cannot_upload(
     assert listing.json()["items"][0]["id"] == metadata["id"]
     assert app_client.get(f"/api/v1/recordings/{metadata['id']}/status").status_code == 200
     assert app_client.get(f"/api/v1/recordings/{metadata['id']}/activity").status_code == 200
+    audio = app_client.get(
+        f"/api/v1/recordings/{metadata['id']}/audio", headers={"Range": "bytes=0-15"}
+    )
+    assert audio.status_code == 206
+    assert audio.content == wav_bytes[:16]
 
     next_files, next_headers, _ = make_upload(wav_bytes + b"different")
     next_headers.pop("Authorization")

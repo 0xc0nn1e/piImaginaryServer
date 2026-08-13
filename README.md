@@ -284,7 +284,9 @@ status, transcript, analysis, and activity endpoints. Browser upload, editing,
 reprocessing, and deletion additionally require the exact configured Origin and CSRF token.
 Bearer-authenticated machine clients may use the same mutation endpoints
 without browser CSRF headers. Upload and the legacy failed-job retry endpoint
-remain machine-Bearer-only. Browser audio playback is deliberately absent.
+remain machine-Bearer-only. The detail UI may stream the private original through
+the authenticated same-origin audio endpoint for timestamped sentence playback;
+the endpoint supports byte ranges and never exposes a storage path.
 
 Raspberry Pi and other machine clients send:
 
@@ -433,6 +435,7 @@ must inspect and quarantine repeatedly rejected client items.
 | `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV browser upload. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
+| `GET` | `/api/v1/recordings/{id}/audio` | Session-protected original audio stream with HTTP byte-range support. |
 | `GET` | `/api/v1/recordings/{id}/status` | Current recording and latest job stage/error state. |
 | `GET` | `/api/v1/recordings/{id}/activity` | Paginated, privacy-safe processing activity. |
 | `GET` | `/api/v1/recordings/{id}/transcript` | Ordered timestamped segments and formatted transcript. |
@@ -665,8 +668,10 @@ and [structured responses](https://lmstudio.ai/docs/python/llm-prediction/struct
 
 Long transcripts are split by segments into bounded chunks and combined with
 hierarchical structured map/reduce. Every response layer is Pydantic-validated;
-Japanese quotes must occur in the referenced transcript segment, and the
-server—not the model—adds timestamps and speaker labels. Logs never contain
+new results contain a concise bilingual description plus a more detailed
+bilingual summary. Japanese quote cards are retained only when their text occurs
+in the referenced transcript segment, and the server—not the model—adds start/end
+timestamps and speaker labels. Logs never contain
 prompts, transcripts, responses, or token content.
 
 The original audio and normalized WAV always remain on this audio server. Only
@@ -674,6 +679,8 @@ transcript text crosses the trusted LAN to LM Studio. A 5090 accelerates this
 LLM analysis; it does not accelerate faster-whisper unless the worker itself is
 separately rebuilt/configured for that GPU. The analysis-only endpoint reads
 the transcript from PostgreSQL and never touches audio, Whisper, or pyannote.
+Sentence playback streams audio only from this server to the authenticated
+browser; it never sends audio to LM Studio.
 
 ## Database migrations
 

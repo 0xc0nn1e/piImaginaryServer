@@ -82,6 +82,10 @@ def _segment(text: str = "一旦こちらで持ち帰ります。") -> MergedTra
 def _draft(quote: str = "一旦こちらで持ち帰ります。") -> dict[str, object]:
     return {
         "description": {"ja": "打ち合わせです。", "zh_hk": "呢段係會議內容。"},
+        "summary": {
+            "ja": "来週の対応について確認した打ち合わせです。担当者は内容を持ち帰って検討します。",
+            "zh_hk": "呢段會議確認咗下星期嘅處理安排。負責人會將內容帶返去再研究。",
+        },
         "tags": [{"ja": "検討", "zh_hk": "研究"}],
         "natural_expressions": [
             {
@@ -119,8 +123,10 @@ def test_lmstudio_uses_exactly_one_loaded_handle_and_structured_schema() -> None
     schema = response_format.model_json_schema()
     assert '"maxLength":' not in json.dumps(schema)
     assert result.data is not None
+    assert result.data["summary"]["ja"].startswith("来週")  # type: ignore[index]
     expression = result.data["natural_expressions"][0]  # type: ignore[index]
     assert expression["start_time"] == 84.2  # type: ignore[index]
+    assert expression["end_time"] == 90  # type: ignore[index]
     assert expression["speaker_label"] == "SPEAKER_01"  # type: ignore[index]
 
 
@@ -157,6 +163,7 @@ def test_lmstudio_discards_ungrounded_quotes_without_losing_valid_analysis() -> 
     assert result.status is AnalysisStatus.COMPLETED
     assert result.data is not None
     assert result.data["description"]["ja"] == "打ち合わせです。"  # type: ignore[index]
+    assert result.data["summary"]["ja"].startswith("来週")  # type: ignore[index]
     assert result.data["tags"] == [{"ja": "検討", "zh_hk": "研究"}]
     assert result.data["natural_expressions"] == []
     assert result.data["highlights"] == []

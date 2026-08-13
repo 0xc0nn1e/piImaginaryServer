@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
@@ -8,6 +8,7 @@ import {
   getAnalysis,
   getReanalysis,
   getRecording,
+  getRecordingAudioUrl,
   getRecordingStatus,
   getTranscript,
   reprocessRecording,
@@ -43,7 +44,9 @@ const terminalStatuses = new Set(["completed", "failed"]);
 const failureEvents = new Set(["processing_failed"]);
 
 function cloneResult(result: AnalysisResultV2): AnalysisResultV2 {
-  return JSON.parse(JSON.stringify(result)) as AnalysisResultV2;
+  const clone = JSON.parse(JSON.stringify(result)) as AnalysisResultV2;
+  clone.summary ??= { ...clone.description };
+  return clone;
 }
 
 export function RecordingDetailPage() {
@@ -64,6 +67,49 @@ export function RecordingDetailPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [mutationPending, setMutationPending] = useState<Mutation | null>(null);
   const [mutationMessage, setMutationMessage] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const clipEndRef = useRef<number | null>(null);
+  const [playingClip, setPlayingClip] = useState<string | null>(null);
+
+  const stopPlayback = useCallback(() => {
+    audioRef.current?.pause();
+    clipEndRef.current = null;
+    setPlayingClip(null);
+  }, []);
+
+  const playClip = useCallback(
+    async (key: string, startTime: number, endTime: number | null) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      if (playingClip === key && !audio.paused) {
+        stopPlayback();
+        return;
+      }
+      try {
+        if (audio.readyState < HTMLMediaElement.HAVE_METADATA) {
+          await new Promise<void>((resolve, reject) => {
+            audio.addEventListener("loadedmetadata", () => resolve(), { once: true });
+            audio.addEventListener("error", () => reject(new Error("audio unavailable")), {
+              once: true,
+            });
+            audio.load();
+          });
+        }
+        const fallbackEnd = Math.min(startTime + 8, audio.duration || startTime + 8);
+        clipEndRef.current =
+          endTime !== null && endTime > startTime ? endTime : fallbackEnd;
+        audio.currentTime = Math.max(0, startTime);
+        await audio.play();
+        setPlayingClip(key);
+      } catch {
+        stopPlayback();
+        setMutationMessage(t("analysis.playError"));
+      }
+    },
+    [playingClip, stopPlayback, t],
+  );
+
+  useEffect(() => () => stopPlayback(), [stopPlayback]);
 
   const handleRequestError = useCallback(
     (caught: unknown) => {
@@ -311,6 +357,18 @@ export function RecordingDetailPage() {
 
   return (
     <section className="page-stack detail-page">
+      <audio
+        aria-hidden="true"
+        className="clip-audio"
+        onEnded={stopPlayback}
+        onTimeUpdate={(event) => {
+          const endTime = clipEndRef.current;
+          if (endTime !== null && event.currentTarget.currentTime >= endTime) stopPlayback();
+        }}
+        preload="metadata"
+        ref={audioRef}
+        src={getRecordingAudioUrl(id)}
+      />
       <Link className="back-link" to="/recordings">
         <span aria-hidden="true">←</span> {t("detail.back")}
       </Link>
@@ -483,14 +541,14 @@ export function RecordingDetailPage() {
           {analysis.kind === "ready" && analysis.data.status === "failed" ? <div className="notice notice-error" role="status">{analysis.data.error?.message ?? t("analysis.failed")}</div> : null}
           {analysis.kind === "ready" && analysis.data.job?.kind === "analysis" && analysis.data.job.status === "failed" ? <div className="notice notice-error" role="status">{analysis.data.job.error?.message ?? t("analysis.failedPreserved")}</div> : null}
           {analysis.kind === "ready" && analysis.data.job?.kind === "analysis" && ["queued", "processing"].includes(analysis.data.job.status) ? <div className="notice notice-action" role="status">{t("analysis.refreshing")}</div> : null}
-          {shownAnalysis ? <AnalysisContent result={shownAnalysis} editing={analysisDraft !== null} copied={copied} setResult={setAnalysisDraft} copyText={copyText} /> : null}
+          {shownAnalysis ? <AnalysisContent result={shownAnalysis} editing={analysisDraft !== null} copied={copied} playingClip={playingClip} setResult={setAnalysisDraft} copyText={copyText} playClip={playClip} /> : null}
         </section>
       ) : null}
     </section>
   );
 }
 
-function AnalysisContent({ result, editing, copied, setResult, copyText }: { result: AnalysisResultV2; editing: boolean; copied: string | null; setResult: (value: AnalysisResultV2 | null) => void; copyText: (key: string, text: string) => Promise<void> }) {
+function AnalysisContent({ result, editing, copied, playingClip, setResult, copyText, playClip }: { result: AnalysisResultV2; editing: boolean; copied: string | null; playingClip: string | null; setResult: (value: AnalysisResultV2 | null) => void; copyText: (key: string, text: string) => Promise<void>; playClip: (key: string, startTime: number, endTime: number | null) => Promise<void> }) {
   const { t } = useI18n();
   const update = (mutate: (draft: AnalysisResultV2) => void) => {
     const next = cloneResult(result);
@@ -504,10 +562,17 @@ function AnalysisContent({ result, editing, copied, setResult, copyText }: { res
         <div><span>日本語</span>{editing ? <textarea value={result.description.ja} onChange={(event) => update((next) => { next.description.ja = event.target.value; })} /> : <p>{result.description.ja}</p>}</div>
         <div><span>廣東話</span>{editing ? <textarea value={result.description.zh_hk} onChange={(event) => update((next) => { next.description.zh_hk = event.target.value; })} /> : <p>{result.description.zh_hk}</p>}</div>
       </div>
+      {result.summary ? <div className="analysis-summary">
+        <div className="analysis-subheading"><h4>{t("analysis.summary")}</h4><button className="text-button" type="button" onClick={() => void copyText("summary", `${result.summary?.ja ?? ""}\n\n${result.summary?.zh_hk ?? ""}`)}>{copied === "summary" ? t("detail.copied") : t("analysis.copy")}</button></div>
+        <div className="bilingual-grid summary-grid">
+          <div><span>日本語</span>{editing ? <textarea value={result.summary.ja} onChange={(event) => update((next) => { if (next.summary) next.summary.ja = event.target.value; })} /> : <p>{result.summary.ja}</p>}</div>
+          <div><span>廣東話</span>{editing ? <textarea value={result.summary.zh_hk} onChange={(event) => update((next) => { if (next.summary) next.summary.zh_hk = event.target.value; })} /> : <p>{result.summary.zh_hk}</p>}</div>
+        </div>
+      </div> : null}
       <div className="tag-list">{result.tags.map((tag, index) => editing ? <span className="tag-edit" key={index}><input aria-label={`${t("analysis.tag")} ${index + 1} 日本語`} value={tag.ja} onChange={(event) => update((next) => { next.tags[index].ja = event.target.value; })} /><input aria-label={`${t("analysis.tag")} ${index + 1} 廣東話`} value={tag.zh_hk} onChange={(event) => update((next) => { next.tags[index].zh_hk = event.target.value; })} /></span> : <span className="tag-chip" key={`${tag.ja}-${tag.zh_hk}`}>{tag.ja}<small>{tag.zh_hk}</small></span>)}</div>
     </section>
-    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Natural expressions</p><h3>{t("analysis.expressions")}</h3></div><span>{result.natural_expressions.length}</span></div><div className="analysis-card-grid">{result.natural_expressions.map((item, index) => <article className="panel analysis-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><button className="text-button" type="button" onClick={() => void copyText(`expression-${index}`, `${item.original_ja}\n${item.translation_zh_hk}\n${item.usage_ja}\n${item.usage_zh_hk}`)}>{copied === `expression-${index}` ? t("detail.copied") : t("analysis.copy")}</button></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.natural_expressions[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].translation_zh_hk = event.target.value; })} /><textarea value={item.usage_ja} onChange={(event) => update((next) => { next.natural_expressions[index].usage_ja = event.target.value; })} /><textarea value={item.usage_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].usage_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.usage_ja}</span><span>{item.usage_zh_hk}</span></div></>}</article>)}</div></section>
-    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Highlights</p><h3>{t("analysis.highlights")}</h3></div><span>{result.highlights.length}</span></div><div className="analysis-card-grid">{result.highlights.map((item, index) => <article className="panel analysis-card highlight-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><button className="text-button" type="button" onClick={() => void copyText(`highlight-${index}`, `${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`)}>{copied === `highlight-${index}` ? t("detail.copied") : t("analysis.copy")}</button></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.highlights[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.highlights[index].translation_zh_hk = event.target.value; })} /><textarea value={item.reason_ja} onChange={(event) => update((next) => { next.highlights[index].reason_ja = event.target.value; })} /><textarea value={item.reason_zh_hk} onChange={(event) => update((next) => { next.highlights[index].reason_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.reason_ja}</span><span>{item.reason_zh_hk}</span></div></>}</article>)}</div></section>
+    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Natural expressions</p><h3>{t("analysis.expressions")}</h3></div><span>{result.natural_expressions.length}</span></div><div className="analysis-card-grid">{result.natural_expressions.map((item, index) => { const clipKey = `expression-${index}`; return <article className="panel analysis-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.usage_ja}\n${item.usage_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.natural_expressions[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].translation_zh_hk = event.target.value; })} /><textarea value={item.usage_ja} onChange={(event) => update((next) => { next.natural_expressions[index].usage_ja = event.target.value; })} /><textarea value={item.usage_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].usage_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.usage_ja}</span><span>{item.usage_zh_hk}</span></div></>}</article>; })}</div></section>
+    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Highlights</p><h3>{t("analysis.highlights")}</h3></div><span>{result.highlights.length}</span></div><div className="analysis-card-grid">{result.highlights.map((item, index) => { const clipKey = `highlight-${index}`; return <article className="panel analysis-card highlight-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.highlights[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.highlights[index].translation_zh_hk = event.target.value; })} /><textarea value={item.reason_ja} onChange={(event) => update((next) => { next.highlights[index].reason_ja = event.target.value; })} /><textarea value={item.reason_zh_hk} onChange={(event) => update((next) => { next.highlights[index].reason_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.reason_ja}</span><span>{item.reason_zh_hk}</span></div></>}</article>; })}</div></section>
   </>;
 }
 
@@ -515,5 +580,6 @@ function formatAnalysisCopy(result: AnalysisResultV2): string {
   const tags = result.tags.map((tag) => `${tag.ja} / ${tag.zh_hk}`).join(", ");
   const expressions = result.natural_expressions.map((item) => `[${formatTimestamp(item.start_time)}] ${item.original_ja}\n${item.translation_zh_hk}\n${item.usage_ja}\n${item.usage_zh_hk}`).join("\n\n");
   const highlights = result.highlights.map((item) => `[${formatTimestamp(item.start_time)}] ${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`).join("\n\n");
-  return `${result.description.ja}\n\n${result.description.zh_hk}\n\n${tags}\n\n${expressions}\n\n${highlights}`.trim();
+  const summary = result.summary ? `${result.summary.ja}\n\n${result.summary.zh_hk}` : "";
+  return `${result.description.ja}\n\n${result.description.zh_hk}\n\n${summary}\n\n${tags}\n\n${expressions}\n\n${highlights}`.trim();
 }

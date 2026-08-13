@@ -139,6 +139,10 @@ export function getRecording(recordingId: string): Promise<RecordingSummary> {
   return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}`);
 }
 
+export function getRecordingAudioUrl(recordingId: string): string {
+  return `/api/v1/recordings/${encodeURIComponent(recordingId)}/audio`;
+}
+
 export function getRecordingStatus(recordingId: string): Promise<RecordingStatusResponse> {
   return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/status`);
 }

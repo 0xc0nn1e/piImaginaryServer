@@ -108,6 +108,7 @@ class _AnalysisDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: _DraftDescription
+    summary: _DraftDescription
     tags: list[_DraftTag] = Field(max_length=12)
     natural_expressions: list[_DraftExpression] = Field(max_length=20)
     highlights: list[_DraftHighlight] = Field(max_length=12)
@@ -162,6 +163,7 @@ class _GenerationAnalysisDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: _GenerationDescription
+    summary: _GenerationDescription
     tags: list[_GenerationTag] = Field(max_length=12)
     natural_expressions: list[_GenerationExpression] = Field(max_length=20)
     highlights: list[_GenerationHighlight] = Field(max_length=12)
@@ -210,6 +212,10 @@ class LMStudioAnalysisProvider:
                 description=BilingualDescription(
                     ja="分析できる発話はありません。",
                     zh_hk="沒有可供分析的語音內容。",
+                ),
+                summary=BilingualDescription(
+                    ja="文字起こしに分析できる発話がないため、詳しい内容要約はありません。",
+                    zh_hk="逐字稿沒有可供分析的語音內容，因此暫時沒有詳細內容摘要。",
                 ),
                 tags=[],
                 natural_expressions=[],
@@ -334,7 +340,10 @@ def chunk_transcript(
 def _map_prompt(transcript: str) -> str:
     return (
         "Analyze the Japanese transcript below. Return only the required structured response. "
-        "Write every field in both Japanese and natural Hong Kong Cantonese. Select at most 12 "
+        "Write every field in both Japanese and natural Hong Kong Cantonese. Make description a "
+        "single concise sentence. Make summary a substantially more detailed 4-8 sentence account "
+        "covering context, main topics, conclusions, decisions, and follow-up actions actually "
+        "present in the transcript; do not invent missing details. Select at most 12 "
         "tags, 20 useful natural expressions, and 12 highlights. For expressions/highlights, "
         "copy original_ja exactly from the referenced SEGMENT without adding quotation marks, "
         "and use its sequence number. "
@@ -347,6 +356,8 @@ def _reduce_prompt(drafts: Sequence[_AnalysisDraft]) -> str:
     payload = [draft.model_dump(mode="json") for draft in drafts]
     return (
         "Merge these partial bilingual transcript analyses into one structured response. "
+        "Keep description to one concise sentence and write summary as a detailed 4-8 sentence "
+        "account of the full transcript, including grounded conclusions and follow-up actions. "
         "Preserve only grounded original_ja quotes and their segment_sequence. Deduplicate items. "
         "Keep at most 12 tags, 20 natural expressions, and 12 highlights. Return only the required "
         "structured response.\n\n"
@@ -451,6 +462,7 @@ def _to_result(
             NaturalExpression(
                 **expression.model_dump(),
                 start_time=segment.start,
+                end_time=segment.end,
                 speaker_label=segment.speaker_label,
             )
         )
@@ -469,6 +481,7 @@ def _to_result(
             AnalysisHighlight(
                 **draft_highlight.model_dump(),
                 start_time=segment.start,
+                end_time=segment.end,
                 speaker_label=segment.speaker_label,
             )
         )
@@ -486,6 +499,7 @@ def _to_result(
             break
     return AnalysisResultV2(
         description=BilingualDescription.model_validate(draft.description.model_dump()),
+        summary=BilingualDescription.model_validate(draft.summary.model_dump()),
         tags=tags,
         natural_expressions=expressions,
         highlights=highlights,

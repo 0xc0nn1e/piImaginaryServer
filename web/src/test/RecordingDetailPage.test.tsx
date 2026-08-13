@@ -43,6 +43,37 @@ const completedStatus = {
     error: null,
   },
 };
+const completedAnalysis = {
+  recording_id: recordingId,
+  status: "completed",
+  provider: "lmstudio",
+  model: "loaded/model",
+  schema_version: "2",
+  revision: 2,
+  result: {
+    description: { ja: "会議の説明です。", zh_hk: "呢段係會議內容。" },
+    summary: {
+      ja: "会議では来週の対応方針を確認しました。担当者は内容を持ち帰って検討します。",
+      zh_hk: "會議確認咗下星期嘅處理方向。負責人會將內容帶返去再研究。",
+    },
+    tags: [{ ja: "検討", zh_hk: "研究" }],
+    natural_expressions: [
+      {
+        segment_sequence: 0,
+        start_time: 5,
+        end_time: 7,
+        speaker_label: "SPEAKER_00",
+        original_ja: "一旦こちらで持ち帰ります。",
+        translation_zh_hk: "我哋暫時拎返去研究。",
+        usage_ja: "職場で保留するときの表現です。",
+        usage_zh_hk: "職場表示要內部研究時使用。",
+      },
+    ],
+    highlights: [],
+  },
+  job: null,
+  error: null,
+};
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -87,6 +118,7 @@ function mockDetailApi(transcriptResponse: Response) {
       );
     }
     if (path.endsWith("/transcript")) return Promise.resolve(transcriptResponse);
+    if (path.endsWith("/analysis")) return Promise.resolve(jsonResponse(completedAnalysis));
     if (path.endsWith("/reprocess")) {
       return Promise.resolve(
         jsonResponse(
@@ -169,6 +201,37 @@ describe("recording transcript states", () => {
     await browser.click(screen.getByRole("tab", { name: "處理記錄" }));
 
     expect(screen.getByText(/階段不詳 · 狀態不詳/)).toBeInTheDocument();
+  });
+
+  it("shows the detailed bilingual summary and plays an expression from its timestamp", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal(
+      "fetch",
+      mockDetailApi(
+        jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(await screen.findByRole("heading", { name: "內容摘要" })).toBeInTheDocument();
+    expect(screen.getByText(/會議確認咗下星期嘅處理方向/)).toBeInTheDocument();
+
+    const audio = document.querySelector("audio");
+    expect(audio).not.toBeNull();
+    Object.defineProperty(audio, "readyState", { configurable: true, value: 1 });
+    Object.defineProperty(audio, "duration", { configurable: true, value: 60 });
+    const play = vi.spyOn(audio as HTMLAudioElement, "play").mockResolvedValue();
+    vi.spyOn(audio as HTMLAudioElement, "pause").mockImplementation(() => undefined);
+
+    await browser.click(screen.getByRole("button", { name: /播放原音.*一旦こちら/ }));
+
+    await waitFor(() => expect(play).toHaveBeenCalledOnce());
+    expect((audio as HTMLAudioElement).currentTime).toBe(5);
+    expect(screen.getByRole("button", { name: /停止.*一旦こちら/ })).toBeInTheDocument();
   });
 
   it("queues reprocessing with the CSRF cookie", async () => {

@@ -198,6 +198,7 @@ class NaturalExpression(BaseModel):
 
     segment_sequence: int = Field(ge=0)
     start_time: float = Field(ge=0)
+    end_time: float | None = Field(default=None, gt=0)
     speaker_label: str = Field(min_length=1, max_length=64)
     original_ja: str = Field(min_length=1, max_length=1000)
     translation_zh_hk: str = Field(min_length=1, max_length=1000)
@@ -210,6 +211,7 @@ class AnalysisHighlight(BaseModel):
 
     segment_sequence: int = Field(ge=0)
     start_time: float = Field(ge=0)
+    end_time: float | None = Field(default=None, gt=0)
     speaker_label: str = Field(min_length=1, max_length=64)
     original_ja: str = Field(min_length=1, max_length=1000)
     translation_zh_hk: str = Field(min_length=1, max_length=1000)
@@ -221,6 +223,7 @@ class AnalysisResultV2(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: BilingualDescription
+    summary: BilingualDescription | None = None
     tags: list[BilingualTag] = Field(max_length=12)
     natural_expressions: list[NaturalExpression] = Field(max_length=20)
     highlights: list[AnalysisHighlight] = Field(max_length=12)

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePath, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import BinaryIO
 
 from sqlalchemy import Select, select
@@ -272,6 +273,21 @@ class RecordingService:
                     "recording_not_found", "Recording was not found.", status_code=404
                 )
             return recording
+
+    def get_audio_file(self, recording_id: uuid.UUID) -> tuple[Recording, Path, os.stat_result]:
+        """Resolve a private original for an authenticated range-capable response."""
+
+        recording = self.get_recording(recording_id)
+        try:
+            with self._storage.materialize(recording.storage_key) as path:
+                stat_result = path.stat()
+                return recording, path, stat_result
+        except (FileNotFoundError, OSError) as exc:
+            raise RecordingServiceError(
+                "audio_unavailable",
+                "The original audio file is unavailable.",
+                status_code=404,
+            ) from exc
 
     def get_status(self, recording_id: uuid.UUID) -> tuple[Recording, ProcessingJob | None]:
         with self._session_factory() as session:

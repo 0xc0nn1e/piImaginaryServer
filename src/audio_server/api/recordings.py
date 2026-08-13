@@ -4,6 +4,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
 from audio_server.api.dependencies import (
@@ -103,6 +104,22 @@ def get_recording(
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> RecordingSummary:
     return RecordingSummary.model_validate(service.get_recording(recording_id))
+
+
+@router.get("/{recording_id}/audio", response_class=FileResponse)
+def get_recording_audio(
+    recording_id: uuid.UUID,
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> FileResponse:
+    recording, path, stat_result = service.get_audio_file(recording_id)
+    return FileResponse(
+        path,
+        media_type=recording.mime_type,
+        filename=recording.original_filename,
+        content_disposition_type="inline",
+        stat_result=stat_result,
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/{recording_id}/status", response_model=RecordingStatusResponse)

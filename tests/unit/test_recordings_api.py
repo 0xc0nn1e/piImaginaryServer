@@ -270,6 +270,34 @@ def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: by
     assert analysis.json()["status"] == "skipped"
 
 
+def test_original_audio_stream_supports_authenticated_byte_ranges(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    uploaded = app_client.post("/api/v1/recordings", files=files, headers=headers)
+    assert uploaded.status_code == 201
+    recording_id = metadata["id"]
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+    full = app_client.get(f"/api/v1/recordings/{recording_id}/audio", headers=auth)
+    assert full.status_code == 200
+    assert full.content == wav_bytes
+    assert full.headers["content-type"].startswith("audio/wav")
+    assert full.headers["accept-ranges"] == "bytes"
+    assert full.headers["cache-control"] == "private, no-store"
+
+    ranged = app_client.get(
+        f"/api/v1/recordings/{recording_id}/audio",
+        headers={**auth, "Range": "bytes=0-15"},
+    )
+    assert ranged.status_code == 206
+    assert ranged.content == wav_bytes[:16]
+    assert ranged.headers["content-range"] == f"bytes 0-15/{len(wav_bytes)}"
+
+    unauthenticated = app_client.get(f"/api/v1/recordings/{recording_id}/audio")
+    assert unauthenticated.status_code == 401
+
+
 def test_analysis_only_reprocess_keeps_recording_completed(
     app_client: TestClient, wav_bytes: bytes
 ) -> None:

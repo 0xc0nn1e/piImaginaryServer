@@ -245,6 +245,31 @@ textarea {
   margin-top: 9px;
 }
 
+.analysis-summary {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.analysis-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.analysis-subheading h4 {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.summary-grid p {
+  line-height: 1.75;
+}
+
+.summary-grid textarea {
+  min-height: 210px;
+}
+
 .tag-list {
   display: flex;
   gap: 8px;
@@ -295,7 +320,37 @@ textarea {
   font-size: 0.65rem;
 }
 
-.analysis-card-meta .text-button { margin-left: auto; }
+.analysis-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.clip-button {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 5px 8px;
+  border: 1px solid rgb(112 227 193 / 24%);
+  border-radius: 999px;
+  color: var(--mint);
+  background: var(--mint-soft);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.67rem;
+}
+
+.clip-button:hover,
+.clip-button.is-playing {
+  border-color: rgb(112 227 193 / 46%);
+  color: #c7f8ea;
+  background: rgb(112 227 193 / 18%);
+}
+
+.clip-button span {
+  font-size: 0.58rem;
+}
 
 .analysis-card blockquote {
   padding: 0 0 0 12px;
@@ -1377,6 +1432,10 @@ select {
   border: 1px solid rgb(112 227 193 / 18%);
   color: #b5f0df;
   background: var(--mint-soft);
+}
+
+.clip-audio {
+  display: none;
 }
 
 .back-link {
