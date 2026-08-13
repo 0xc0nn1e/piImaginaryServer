@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any
@@ -113,6 +114,10 @@ def test_lmstudio_uses_exactly_one_loaded_handle_and_structured_schema() -> None
     _prompt, kwargs = model.calls[0]
     assert "response_format" in kwargs
     assert "model" not in kwargs
+    response_format = kwargs["response_format"]
+    assert isinstance(response_format, type)
+    schema = response_format.model_json_schema()
+    assert '"maxLength":' not in json.dumps(schema)
     assert result.data is not None
     expression = result.data["natural_expressions"][0]  # type: ignore[index]
     assert expression["start_time"] == 84.2  # type: ignore[index]
@@ -187,6 +192,20 @@ def test_lmstudio_rejects_missing_invalid_or_unstructured_output(response: objec
     provider = LMStudioAnalysisProvider(
         LMStudioSettings(host="lmstudio.test:1234"),
         client_factory=lambda _settings: FakeContext(FakeClient([InvalidModel(_draft())])),
+    )
+
+    with pytest.raises(PermanentProcessingError) as caught:
+        provider.analyze("recording-id", [_segment()])
+
+    assert caught.value.code == "lmstudio_schema_invalid"
+
+
+def test_lmstudio_enforces_string_limits_after_structured_generation() -> None:
+    oversized = _draft()
+    oversized["description"] = {"ja": "あ" * 4001, "zh_hk": "有效內容"}
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([FakeModel(oversized)])),
     )
 
     with pytest.raises(PermanentProcessingError) as caught:

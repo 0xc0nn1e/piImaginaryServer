@@ -113,6 +113,60 @@ class _AnalysisDraft(BaseModel):
     highlights: list[_DraftHighlight] = Field(max_length=12)
 
 
+class _GenerationDescription(BaseModel):
+    """Grammar-safe description schema used only during constrained generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ja: str = Field(min_length=1)
+    zh_hk: str = Field(min_length=1)
+
+
+class _GenerationTag(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ja: str = Field(min_length=1)
+    zh_hk: str = Field(min_length=1)
+
+
+class _GenerationExpression(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_sequence: int = Field(ge=0)
+    original_ja: str = Field(min_length=1)
+    translation_zh_hk: str = Field(min_length=1)
+    usage_ja: str = Field(min_length=1)
+    usage_zh_hk: str = Field(min_length=1)
+
+
+class _GenerationHighlight(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_sequence: int = Field(ge=0)
+    original_ja: str = Field(min_length=1)
+    translation_zh_hk: str = Field(min_length=1)
+    reason_ja: str = Field(min_length=1)
+    reason_zh_hk: str = Field(min_length=1)
+
+
+class _GenerationAnalysisDraft(BaseModel):
+    """Pydantic response schema without large string repetition bounds.
+
+    LM Studio translates JSON Schema string ``maxLength`` values into llama.cpp
+    grammar repetitions. The strict limits used by ``_AnalysisDraft`` are much
+    larger than llama.cpp's grammar safety ceiling, so generation uses this
+    otherwise-identical schema and the server validates the parsed result with
+    ``_AnalysisDraft`` before accepting it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: _GenerationDescription
+    tags: list[_GenerationTag] = Field(max_length=12)
+    natural_expressions: list[_GenerationExpression] = Field(max_length=20)
+    highlights: list[_GenerationHighlight] = Field(max_length=12)
+
+
 class _LoadedModel(Protocol):
     identifier: object
 
@@ -236,7 +290,7 @@ class LMStudioAnalysisProvider:
         try:
             response = model.respond(
                 prompt,
-                response_format=_AnalysisDraft,
+                response_format=_GenerationAnalysisDraft,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
             if not bool(getattr(response, "structured", True)):
