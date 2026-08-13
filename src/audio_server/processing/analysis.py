@@ -244,8 +244,7 @@ class LMStudioAnalysisProvider:
                         self._respond(model, _reduce_prompt(group))
                         for group in _group_drafts(drafts, self._settings.chunk_chars)
                     ]
-                draft = drafts[0]
-                _validate_grounding(draft, segments)
+                draft = _ground_draft(drafts[0], segments)
                 result = _to_result(draft, segments)
                 return AnalysisResult(
                     status=AnalysisStatus.COMPLETED,
@@ -337,7 +336,8 @@ def _map_prompt(transcript: str) -> str:
         "Analyze the Japanese transcript below. Return only the required structured response. "
         "Write every field in both Japanese and natural Hong Kong Cantonese. Select at most 12 "
         "tags, 20 useful natural expressions, and 12 highlights. For expressions/highlights, "
-        "copy original_ja exactly from the referenced SEGMENT and use its sequence number. "
+        "copy original_ja exactly from the referenced SEGMENT without adding quotation marks, "
+        "and use its sequence number. "
         "If no Japanese quote is available, return an empty corresponding array.\n\n"
         + transcript
     )
@@ -380,21 +380,59 @@ def _group_drafts(
     return tuple(groups)
 
 
-def _validate_grounding(
+def _ground_draft(
     draft: _AnalysisDraft, segments: Sequence[MergedTranscriptSegment]
-) -> None:
+) -> _AnalysisDraft:
+    """Keep only quotes grounded in their designated transcript segment.
+
+    A model may wrap a verbatim quote in quotation marks even when instructed
+    not to. Strip only surrounding whitespace and a single matching quote pair;
+    never fuzzy-match or accept paraphrases. The retained ``original_ja`` is
+    therefore always an exact substring of the transcript.
+    """
+
     text_by_sequence = {segment.sequence: segment.text for segment in segments}
-    candidates: Sequence[_DraftExpression | _DraftHighlight] = (
-        *draft.natural_expressions,
-        *draft.highlights,
-    )
-    for item in candidates:
-        text = text_by_sequence.get(item.segment_sequence)
-        if text is None or item.original_ja not in text:
-            raise PermanentProcessingError(
-                code="lmstudio_quote_not_grounded",
-                safe_message="LM Studio returned a quote that is not present in the transcript.",
+    expressions: list[_DraftExpression] = []
+    for expression_item in draft.natural_expressions:
+        text = text_by_sequence.get(expression_item.segment_sequence)
+        grounded = _exact_grounded_quote(expression_item.original_ja, text)
+        if grounded is not None:
+            expressions.append(
+                expression_item.model_copy(update={"original_ja": grounded})
             )
+
+    highlights: list[_DraftHighlight] = []
+    for highlight_item in draft.highlights:
+        text = text_by_sequence.get(highlight_item.segment_sequence)
+        grounded = _exact_grounded_quote(highlight_item.original_ja, text)
+        if grounded is not None:
+            highlights.append(
+                highlight_item.model_copy(update={"original_ja": grounded})
+            )
+    return draft.model_copy(
+        update={"natural_expressions": expressions, "highlights": highlights}
+    )
+
+
+def _exact_grounded_quote(quote: str, transcript: str | None) -> str | None:
+    if transcript is None:
+        return None
+    candidate = quote.strip()
+    if candidate in transcript:
+        return candidate
+    for opening, closing in (
+        ("「", "」"),
+        ("『", "』"),
+        ('"', '"'),
+        ("“", "”"),
+        ("‘", "’"),
+        ("'", "'"),
+    ):
+        if candidate.startswith(opening) and candidate.endswith(closing):
+            unwrapped = candidate[len(opening) : len(candidate) - len(closing)].strip()
+            if unwrapped and unwrapped in transcript:
+                return unwrapped
+    return None
 
 
 def _to_result(

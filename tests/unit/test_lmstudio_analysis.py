@@ -136,16 +136,45 @@ def test_lmstudio_requires_exactly_one_loaded_llm(model_count: int) -> None:
         provider.analyze("recording-id", [_segment()])
 
 
-def test_lmstudio_rejects_ungrounded_japanese_quotes() -> None:
+def test_lmstudio_discards_ungrounded_quotes_without_losing_valid_analysis() -> None:
+    draft = _draft("偽の引用")
+    draft["highlights"] = [
+        {
+            "segment_sequence": 12,
+            "original_ja": "存在しないハイライト",
+            "translation_zh_hk": "不存在嘅重點",
+            "reason_ja": "重要です。",
+            "reason_zh_hk": "呢點重要。",
+        }
+    ]
     provider = LMStudioAnalysisProvider(
         LMStudioSettings(host="lmstudio.test:1234"),
-        client_factory=lambda _settings: FakeContext(FakeClient([FakeModel(_draft("偽の引用"))])),
+        client_factory=lambda _settings: FakeContext(FakeClient([FakeModel(draft)])),
     )
 
-    with pytest.raises(PermanentProcessingError) as caught:
-        provider.analyze("recording-id", [_segment()])
+    result = provider.analyze("recording-id", [_segment()])
 
-    assert caught.value.code == "lmstudio_quote_not_grounded"
+    assert result.status is AnalysisStatus.COMPLETED
+    assert result.data is not None
+    assert result.data["description"]["ja"] == "打ち合わせです。"  # type: ignore[index]
+    assert result.data["tags"] == [{"ja": "検討", "zh_hk": "研究"}]
+    assert result.data["natural_expressions"] == []
+    assert result.data["highlights"] == []
+
+
+def test_lmstudio_unwraps_quote_marks_only_when_inner_text_is_exactly_grounded() -> None:
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(
+            FakeClient([FakeModel(_draft(" 「一旦こちらで持ち帰ります。」 "))])
+        ),
+    )
+
+    result = provider.analyze("recording-id", [_segment()])
+
+    assert result.data is not None
+    expression = result.data["natural_expressions"][0]  # type: ignore[index]
+    assert expression["original_ja"] == "一旦こちらで持ち帰ります。"  # type: ignore[index]
 
 
 def test_lmstudio_maps_timeout_to_retryable_failure() -> None:
