@@ -5,13 +5,14 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from random import Random
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from audio_server.api.schemas import ClientRecordingMetadata
+from audio_server.api.schemas import ClientRecordingMetadata, TranscriptSegmentUpdate
 from audio_server.db.activity_models import ProcessingActivity
 from audio_server.db.models import (
     Analysis,
@@ -28,6 +29,7 @@ from audio_server.processing.errors import (
     ProviderConfigurationError,
     RetryableProcessingError,
 )
+from audio_server.services.recording_service import _overlap_flags
 from tests.conftest import TEST_API_TOKEN, make_upload
 
 
@@ -219,6 +221,129 @@ def test_recording_status_and_list_are_retrievable(
     status = app_client.get(f"/api/v1/recordings/{metadata['id']}/status", headers=auth)
     assert status.status_code == 200
     assert status.json()["job"]["stage"] == "queued"
+
+
+def test_dense_conversational_transcript_is_editable_end_to_end(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    """A transcript far larger than one Whisper segment per speaker turn saves.
+
+    The merge stage emits one segment per contiguous same-speaker word run, so a
+    multi-hour recording with rapid speaker changes reaches tens of thousands of
+    segments, and an edit must resubmit every one of them. This drives the real
+    request path rather than the schema alone, so a segment-count ceiling or a
+    quadratic save would both fail here.
+    """
+
+    segment_count = 12_000
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        recording.duration_seconds = segment_count
+        job.status = JobStatus.COMPLETED
+        session.add_all(
+            TranscriptSegment(
+                recording_id=recording_id,
+                job_id=job.id,
+                sequence=index,
+                speaker_label=f"SPEAKER_0{index % 2}",
+                start_time=index * 0.5,
+                end_time=index * 0.5 + 0.4,
+                text="はい",
+                language="ja",
+                has_overlap=False,
+            )
+            for index in range(segment_count)
+        )
+        session.flush()
+        segment_ids = list(
+            session.scalars(
+                select(TranscriptSegment.id)
+                .where(TranscriptSegment.recording_id == recording_id)
+                .order_by(TranscriptSegment.sequence)
+            )
+        )
+
+    assert len(segment_ids) == segment_count
+    response = app_client.put(
+        f"/api/v1/recordings/{recording_id}/transcript",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+        json={
+            "expected_revision": 0,
+            "segments": [
+                {
+                    "id": str(segment_id),
+                    "speaker_label": "SPEAKER_00",
+                    # The last pair is made to overlap so the sweep is exercised.
+                    "start_time": index * 0.5,
+                    "end_time": index * 0.5 + (0.9 if index == segment_count - 2 else 0.4),
+                    "text": "はい、そうですね。",
+                }
+                for index, segment_id in enumerate(segment_ids)
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["revision"] == 1
+    assert len(body["segments"]) == segment_count
+    overlapping = [item["sequence"] for item in body["segments"] if item["has_overlap"]]
+    assert overlapping == [segment_count - 2, segment_count - 1]
+
+
+def test_overlap_flags_match_the_pairwise_definition() -> None:
+    """The linear sweep must stay equivalent to comparing every pair."""
+
+    def pairwise(ordered: list[TranscriptSegmentUpdate]) -> list[bool]:
+        return [
+            any(
+                other.id != item.id
+                and item.start_time < other.end_time
+                and other.start_time < item.end_time
+                for other in ordered
+            )
+            for item in ordered
+        ]
+
+    def build(spans: list[tuple[float, float]]) -> list[TranscriptSegmentUpdate]:
+        items = [
+            TranscriptSegmentUpdate(
+                id=uuid.uuid4(), speaker_label="S", start_time=start, end_time=end, text="x"
+            )
+            for start, end in spans
+        ]
+        return sorted(items, key=lambda item: (item.start_time, item.end_time, str(item.id)))
+
+    cases: list[list[tuple[float, float]]] = [
+        [(0.0, 1.0)],
+        [(0.0, 1.0), (1.0, 2.0)],
+        [(0.0, 1.5), (1.0, 2.0)],
+        [(0.0, 1.0), (0.0, 1.0)],
+        [(0.0, 9.0), (2.0, 3.0)],
+        [(0.0, 9.0), (1.0, 2.0), (5.0, 6.0)],
+        [(0.0, 1.0), (5.0, 6.5), (6.0, 7.0)],
+        [(0.0, 1.0), (0.0, 4.0), (2.0, 3.0)],
+    ]
+    random = Random(20260814)
+    for _ in range(200):
+        count = random.randint(1, 12)
+        spans = []
+        for _ in range(count):
+            start = random.randint(0, 12) * 0.5 + random.choice([0.0, 0.0, 0.25])
+            spans.append((start, start + random.choice([0.25, 0.5, 1.0, 3.0])))
+        cases.append(spans)
+
+    for spans in cases:
+        ordered = build(spans)
+        assert _overlap_flags(ordered) == pairwise(ordered), spans
 
 
 def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: bytes) -> None:

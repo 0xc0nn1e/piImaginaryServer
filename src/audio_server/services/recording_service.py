@@ -430,6 +430,7 @@ class RecordingService:
             for temporary_sequence, segment in enumerate(segments, start=1):
                 segment.sequence = -temporary_sequence
             session.flush()
+            overlaps = _overlap_flags(ordered)
             for sequence, item in enumerate(ordered):
                 segment = existing_by_id[item.id]
                 segment.sequence = sequence
@@ -438,12 +439,7 @@ class RecordingService:
                 segment.end_time = item.end_time
                 segment.text = item.text
                 segment.confidence = None
-                segment.has_overlap = any(
-                    other.id != item.id
-                    and item.start_time < other.end_time
-                    and other.start_time < item.end_time
-                    for other in ordered
-                )
+                segment.has_overlap = overlaps[sequence]
             recording.transcript_revision += 1
             analysis = session.scalar(
                 select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
@@ -1000,6 +996,29 @@ class RecordingService:
         owner_id = session.scalar(select(Recording.id).where(Recording.storage_key == storage_key))
         if owner_id is None:
             self._storage.delete(storage_key)
+
+
+def _overlap_flags(ordered: list[TranscriptSegmentUpdate]) -> list[bool]:
+    """Flag every segment that shares time with another, in one linear sweep.
+
+    ``ordered`` is sorted by start time, so a segment overlaps something earlier
+    exactly when the largest preceding end time is past its own start, and
+    overlaps something later exactly when the next segment starts before its own
+    end. Comparing each segment against the whole list instead is quadratic, and
+    a dense multi-hour transcript holds tens of thousands of segments.
+    """
+
+    flags: list[bool] = []
+    max_end_before = float("-inf")
+    last_index = len(ordered) - 1
+    for index, item in enumerate(ordered):
+        overlaps_earlier = max_end_before > item.start_time
+        overlaps_later = (
+            index < last_index and ordered[index + 1].start_time < item.end_time
+        )
+        flags.append(overlaps_earlier or overlaps_later)
+        max_end_before = max(max_end_before, item.end_time)
+    return flags
 
 
 def _safe_filename(filename: str) -> str:
