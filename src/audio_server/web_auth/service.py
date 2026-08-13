@@ -21,6 +21,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from audio_server.core.client_address import TrustedNetworks
 from audio_server.core.config import Settings
 from audio_server.web_auth.models import User, WebSession
 
@@ -185,6 +186,7 @@ class WebAuthService:
         session_lifetime: timedelta = timedelta(hours=12),
         cookie_secure: bool = False,
         max_request_bytes: int = 4096,
+        trusted_proxy_networks: TrustedNetworks = (),
         password_manager: PasswordManager | None = None,
         login_rate_limiter: LoginRateLimiter | None = None,
     ) -> None:
@@ -202,6 +204,7 @@ class WebAuthService:
         self.session_lifetime = session_lifetime
         self.cookie_secure = cookie_secure
         self.max_request_bytes = max_request_bytes
+        self.trusted_proxy_networks = trusted_proxy_networks
         self.cookie_name = SESSION_COOKIE_NAME
         self.csrf_cookie_name = CSRF_COOKIE_NAME
         self._passwords = password_manager or Argon2idPasswordManager()
@@ -496,6 +499,7 @@ def create_web_auth_service(
         session_lifetime=timedelta(hours=settings.web_session_hours),
         cookie_secure=settings.app_env == "production" or settings.web_cookie_secure,
         max_request_bytes=settings.web_auth_max_request_bytes,
+        trusted_proxy_networks=settings.trusted_proxy_networks,
         login_rate_limiter=LoginRateLimiter(
             max_attempts=settings.web_login_max_attempts,
             window=timedelta(seconds=settings.web_login_window_seconds),

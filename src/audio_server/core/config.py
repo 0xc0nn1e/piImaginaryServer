@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from audio_server.core.client_address import TrustedNetworks, parse_trusted_networks
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -31,6 +33,11 @@ class Settings(BaseSettings):
     web_login_max_attempts: int = 5
     web_login_window_seconds: int = 300
     web_login_rate_limit_entries: int = 2048
+
+    # Peers allowed to supply X-Forwarded-For. Empty means no proxy is trusted
+    # and the direct peer address is used, which is correct for direct exposure
+    # but collapses every browser client behind a reverse proxy into one bucket.
+    trusted_proxy_ips: str = ""
 
     max_upload_bytes: int = 512 * 1024 * 1024
     max_audio_duration_seconds: float = 6 * 60 * 60
@@ -115,6 +122,17 @@ class Settings(BaseSettings):
             raise ValueError("WEB_ALLOWED_ORIGIN must be an exact HTTP(S) origin")
         return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
+    @field_validator("trusted_proxy_ips")
+    @classmethod
+    def validate_trusted_proxy_ips(cls, value: str) -> str:
+        try:
+            parse_trusted_networks(value)
+        except ValueError:
+            raise ValueError(
+                "TRUSTED_PROXY_IPS must be a comma-separated list of addresses or CIDR ranges"
+            ) from None
+        return value
+
     @field_validator(
         "max_upload_bytes",
         "max_metadata_bytes",
@@ -160,6 +178,10 @@ class Settings(BaseSettings):
         if value is not None and value <= 0:
             raise ValueError("retention days must be positive when set")
         return value
+
+    @property
+    def trusted_proxy_networks(self) -> TrustedNetworks:
+        return parse_trusted_networks(self.trusted_proxy_ips)
 
     @model_validator(mode="after")
     def validate_runtime_contract(self) -> Settings:

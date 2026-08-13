@@ -40,6 +40,24 @@ def test_api_runtime_rejects_missing_or_short_token(
         _validate_api_token(settings)
 
 
+def test_trusted_proxy_ips_are_parsed_into_networks() -> None:
+    settings = Settings(trusted_proxy_ips="172.20.0.0/16, 10.0.0.1")
+
+    assert [str(network) for network in settings.trusted_proxy_networks] == [
+        "172.20.0.0/16",
+        "10.0.0.1/32",
+    ]
+
+
+def test_no_proxy_is_trusted_by_default() -> None:
+    assert Settings().trusted_proxy_networks == ()
+
+
+def test_invalid_trusted_proxy_ips_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="TRUSTED_PROXY_IPS"):
+        Settings(trusted_proxy_ips="172.20.0.0/16, not-a-network")
+
+
 def test_production_web_origin_requires_https() -> None:
     settings = Settings(app_env="production", web_allowed_origin="http://audio.example")
     with pytest.raises(ValueError, match="WEB_ALLOWED_ORIGIN must use HTTPS"):

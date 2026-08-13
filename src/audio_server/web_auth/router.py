@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from audio_server.core.client_address import resolve_client_ip
 from audio_server.web_auth.dependencies import (
     get_web_auth_service,
     require_web_session,
@@ -88,12 +89,16 @@ async def login(
         service.max_request_bytes,
         generic_credentials_error=True,
     )
-    remote_host = request.client.host if request.client is not None else None
+    client_ip = resolve_client_ip(
+        peer_host=request.client.host if request.client is not None else None,
+        forwarded_for=request.headers.getlist("x-forwarded-for"),
+        trusted_networks=service.trusted_proxy_networks,
+    )
     result = await run_in_threadpool(
         service.login,
         username=payload.username,
         password=payload.password,
-        rate_limit_key=rate_limit_key(remote_host),
+        rate_limit_key=rate_limit_key(client_ip),
     )
     response.set_cookie(
         key=service.cookie_name,

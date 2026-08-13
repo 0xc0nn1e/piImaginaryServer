@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from audio_server.core.client_address import parse_trusted_networks
 from audio_server.core.config import Settings
 from audio_server.web_auth.models import User, WebSession
 from audio_server.web_auth.router import register_web_auth_error_handler, router
@@ -77,6 +78,91 @@ def _login(
         headers={"Origin": TRUSTED_ORIGIN},
         json={"username": username, "password": password},
     )
+
+
+def test_login_limits_are_per_client_behind_a_trusted_proxy(
+    session_factory: sessionmaker[Session],
+) -> None:
+    service = WebAuthService(
+        session_factory,
+        setup_token=SETUP_TOKEN,
+        allowed_origin=TRUSTED_ORIGIN,
+        trusted_proxy_networks=parse_trusted_networks("172.20.0.0/16"),
+        password_manager=FastPasswordManager(),
+        login_rate_limiter=LoginRateLimiter(
+            max_attempts=2,
+            window=timedelta(minutes=5),
+            max_entries=16,
+        ),
+    )
+    app = FastAPI()
+    app.state.web_auth_service = service
+    register_web_auth_error_handler(app)
+    app.include_router(router)
+    # Every request arrives from the reverse proxy, as it does in Compose.
+    client = TestClient(app, client=("172.20.0.5", 1234))
+    _setup(client)
+
+    def attempt(forwarded_for: str, password: str = "wrong-password-value"):  # type: ignore[no-untyped-def]
+        return client.post(
+            "/api/v1/auth/login",
+            headers={"Origin": TRUSTED_ORIGIN, "X-Forwarded-For": forwarded_for},
+            json={"username": "admin.user", "password": password},
+        )
+
+    assert attempt("198.51.100.1").status_code == 401
+    assert attempt("198.51.100.1").status_code == 401
+    exhausted = attempt("198.51.100.1")
+    assert exhausted.status_code == 429
+    assert exhausted.json()["error"]["code"] == "login_rate_limited"
+
+    # A different browser client keeps its own budget instead of sharing the
+    # proxy's single address, and the administrator can still sign in.
+    assert attempt("198.51.100.2").status_code == 401
+    assert attempt("198.51.100.2", password=PASSWORD).status_code == 200
+
+
+def test_forged_forwarded_prefix_cannot_escape_the_login_limit(
+    session_factory: sessionmaker[Session],
+) -> None:
+    service = WebAuthService(
+        session_factory,
+        setup_token=SETUP_TOKEN,
+        allowed_origin=TRUSTED_ORIGIN,
+        trusted_proxy_networks=parse_trusted_networks("172.20.0.0/16"),
+        password_manager=FastPasswordManager(),
+        login_rate_limiter=LoginRateLimiter(
+            max_attempts=2,
+            window=timedelta(minutes=5),
+            max_entries=16,
+        ),
+    )
+    app = FastAPI()
+    app.state.web_auth_service = service
+    register_web_auth_error_handler(app)
+    app.include_router(router)
+    client = TestClient(app, client=("172.20.0.5", 1234))
+    _setup(client)
+
+    # The proxy appends the real peer, so rotating the forged left-hand entry
+    # still resolves to one attacker address and exhausts a single bucket.
+    for forged in ("10.1.1.1", "10.2.2.2"):
+        response = client.post(
+            "/api/v1/auth/login",
+            headers={
+                "Origin": TRUSTED_ORIGIN,
+                "X-Forwarded-For": f"{forged}, 198.51.100.9",
+            },
+            json={"username": "admin.user", "password": "wrong-password-value"},
+        )
+        assert response.status_code == 401
+
+    blocked = client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": TRUSTED_ORIGIN, "X-Forwarded-For": "10.3.3.3, 198.51.100.9"},
+        json={"username": "admin.user", "password": "wrong-password-value"},
+    )
+    assert blocked.status_code == 429
 
 
 def test_argon2_manager_produces_argon2id_hash() -> None:

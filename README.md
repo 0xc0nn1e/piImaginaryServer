@@ -217,6 +217,7 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `WEB_AUTH_MAX_REQUEST_BYTES` | `4096` | Total request-body cap for setup and login JSON. |
 | `WEB_LOGIN_MAX_ATTEMPTS` / `WEB_LOGIN_WINDOW_SECONDS` | `5` / `300` | Process-local failed-login limit and window. |
 | `WEB_LOGIN_RATE_LIMIT_ENTRIES` | `2048` | Bound on process-local login limiter keys. |
+| `TRUSTED_PROXY_IPS` | empty | Comma-separated addresses or CIDR ranges whose `X-Forwarded-For` header is honoured when identifying a login client. Empty trusts no proxy and uses the direct peer address. |
 | `DATABASE_URL` | local PostgreSQL URL | SQLAlchemy PostgreSQL URL used outside Compose. |
 | `STORAGE_PATH` | `./data` | Root for originals, work files, staging, and local model caches. |
 | `MAX_UPLOAD_BYTES` | `536870912` | Exact maximum number of bytes in the `audio` part, 512 MiB by default. |
@@ -266,6 +267,23 @@ streaming storage limit still independently enforces the exact number of audio
 bytes. A production reverse proxy must also impose a total request-body limit;
 set it to the derived application cap or slightly higher so the API, rather
 than an unbounded ingress buffer, remains the final validator.
+
+### Client identification behind a reverse proxy
+
+The failed-login limiter buckets attempts by client address. Behind a reverse
+proxy every request arrives from the proxy, so without `TRUSTED_PROXY_IPS` all
+browser clients share a single bucket and any visitor can exhaust the window
+for the administrator. Set `TRUSTED_PROXY_IPS` to the address or CIDR range of
+the proxy itself; the API then reads `X-Forwarded-For` from right to left,
+skipping further trusted hops, so a client-supplied prefix cannot forge an
+identity.
+
+Only list peers that always pass through the proxy. In the bundled Compose
+topology the API port is also published directly, and traffic arriving on it
+appears to originate from the same Docker bridge range as the web container, so
+a broad range such as `172.16.0.0/12` would also let a direct client forge its
+address. Either publish the API exclusively through the proxy before enabling
+this, or pin the proxy to a known address and trust only that.
 
 ## Authentication
 
