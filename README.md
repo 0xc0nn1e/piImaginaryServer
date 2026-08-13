@@ -208,7 +208,7 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | --- | --- | --- |
 | `APP_ENV` | `development` | Runtime environment; use a production value for deployment safety checks. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Application log level and `json` or `plain` output. |
-| `DOCS_ENABLED` | `true` | Enable OpenAPI schema and interactive documentation. |
+| `DOCS_ENABLED` | `false` | Enable OpenAPI schema and interactive documentation. Always forced off when `APP_ENV=production`, because those routes are unauthenticated. |
 | `API_TOKEN` | empty | Machine Bearer credential required for upload/retry and accepted for recording reads. |
 | `WEB_SETUP_TOKEN` | empty | One-time secret of at least 32 characters; leave empty after the first administrator exists. |
 | `WEB_SESSION_HOURS` | `12` | Lifetime of an opaque browser session. |

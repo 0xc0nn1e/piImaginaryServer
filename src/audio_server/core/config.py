@@ -192,6 +192,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime_contract(self) -> Settings:
+        # The schema and interactive documentation are unauthenticated and sit
+        # outside the /api/v1 request guard, so production never serves them
+        # regardless of how DOCS_ENABLED is configured.
+        if self.app_env == "production":
+            self.docs_enabled = False
         if self.job_lease_seconds <= self.job_heartbeat_seconds * 2:
             raise ValueError("JOB_LEASE_SECONDS must exceed two heartbeat intervals")
         if self.retry_max_seconds < self.retry_base_seconds:

@@ -40,6 +40,16 @@ def test_api_runtime_rejects_missing_or_short_token(
         _validate_api_token(settings)
 
 
+def test_production_never_serves_unauthenticated_documentation() -> None:
+    settings = Settings(app_env="production", docs_enabled=True)
+
+    assert settings.docs_enabled is False
+
+
+def test_documentation_stays_available_outside_production() -> None:
+    assert Settings(app_env="development", docs_enabled=True).docs_enabled is True
+
+
 def test_trusted_proxy_ips_are_parsed_into_networks() -> None:
     settings = Settings(trusted_proxy_ips="172.20.0.0/16, 10.0.0.1")
 

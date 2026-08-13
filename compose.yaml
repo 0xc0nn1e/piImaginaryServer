@@ -41,7 +41,7 @@ services:
       target: api
     environment:
       <<: *runtime-environment
-      DOCS_ENABLED: ${DOCS_ENABLED:-true}
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
       API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-536870912}
       MAX_METADATA_BYTES: ${MAX_METADATA_BYTES:-16384}
