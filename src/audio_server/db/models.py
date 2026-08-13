@@ -46,6 +46,11 @@ class JobStatus(enum.StrEnum):
     FAILED = "failed"
 
 
+class JobKind(enum.StrEnum):
+    FULL = "full"
+    ANALYSIS = "analysis"
+
+
 class JobStage(enum.StrEnum):
     QUEUED = "queued"
     PREPROCESSING = "preprocessing"
@@ -60,6 +65,7 @@ class AnalysisStatus(enum.StrEnum):
     COMPLETED = "completed"
     SKIPPED = "skipped"
     FAILED = "failed"
+    STALE = "stale"
 
 
 def enum_column(enum_type: type[enum.Enum], *, name: str) -> Enum:
@@ -109,6 +115,8 @@ class Recording(Base):
     )
     audio_delete_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     transcript_delete_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    transcript_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    analysis_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -144,6 +152,7 @@ class ProcessingJob(Base):
             "'merging', 'analyzing', 'completed')",
             name="failed_job_stage",
         ),
+        CheckConstraint("kind IN ('full', 'analysis')", name="processing_job_kind"),
         Index(
             "ix_processing_jobs_claim",
             "available_at",
@@ -170,6 +179,12 @@ class ProcessingJob(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     recording_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[JobKind] = mapped_column(
+        enum_column(JobKind, name="processing_job_kind"),
+        default=JobKind.FULL,
+        server_default="full",
+        nullable=False,
     )
     status: Mapped[JobStatus] = mapped_column(
         enum_column(JobStatus, name="job_status"), default=JobStatus.QUEUED, nullable=False
@@ -242,10 +257,11 @@ class Analysis(Base):
     __tablename__ = "analyses"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('completed', 'skipped', 'failed')",
+            "status IN ('completed', 'skipped', 'failed', 'stale')",
             name="analysis_status",
         ),
         UniqueConstraint("job_id", name="uq_analyses_job"),
+        UniqueConstraint("recording_id", name="uq_analyses_recording"),
         Index("ix_analyses_recording_created", "recording_id", "created_at"),
     )
 

@@ -1,5 +1,7 @@
 import type {
   ActivityResponse,
+  AnalysisResponse,
+  AnalysisResultV2,
   ProcessingRequestResponse,
   RecordingListResponse,
   RecordingStatus,
@@ -8,6 +10,7 @@ import type {
   SessionResponse,
   SetupStatusResponse,
   TranscriptResponse,
+  UploadRecordingResponse,
 } from "./types";
 import { getStoredLocale, translate } from "./i18n";
 
@@ -38,7 +41,8 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
-  if (options.body !== undefined) {
+  const isFormData = options.body instanceof FormData;
+  if (options.body !== undefined && !isFormData) {
     headers.set("Content-Type", "application/json");
   }
   if (options.csrfToken) {
@@ -47,7 +51,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   const response = await fetch(path, {
     ...options,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body:
+      options.body === undefined
+        ? undefined
+        : isFormData
+          ? (options.body as FormData)
+          : JSON.stringify(options.body),
     credentials: "include",
     headers,
   });
@@ -142,6 +151,63 @@ export function getActivity(recordingId: string): Promise<ActivityResponse> {
 
 export function getTranscript(recordingId: string): Promise<TranscriptResponse> {
   return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/transcript`);
+}
+
+export function getAnalysis(recordingId: string): Promise<AnalysisResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/analysis`);
+}
+
+export function uploadWebRecording(
+  audio: File,
+  startedAt?: string,
+): Promise<UploadRecordingResponse> {
+  const form = new FormData();
+  form.set("audio", audio, audio.name);
+  if (startedAt) form.set("started_at", startedAt);
+  return request("/api/v1/web/recordings", {
+    method: "POST",
+    body: form,
+    csrfToken: requireCsrfCookie(),
+  });
+}
+
+export function updateTranscript(
+  recordingId: string,
+  transcript: TranscriptResponse,
+): Promise<TranscriptResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/transcript`, {
+    method: "PUT",
+    csrfToken: requireCsrfCookie(),
+    body: {
+      expected_revision: transcript.revision,
+      segments: transcript.segments.map(({ id, speaker_label, start_time, end_time, text }) => ({
+        id,
+        speaker_label,
+        start_time,
+        end_time,
+        text,
+      })),
+    },
+  });
+}
+
+export function getReanalysis(recordingId: string): Promise<ProcessingRequestResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/analysis/reprocess`, {
+    method: "POST",
+    csrfToken: requireCsrfCookie(),
+  });
+}
+
+export function updateAnalysis(
+  recordingId: string,
+  revision: number,
+  result: AnalysisResultV2,
+): Promise<AnalysisResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/analysis`, {
+    method: "PUT",
+    csrfToken: requireCsrfCookie(),
+    body: { expected_revision: revision, result },
+  });
 }
 
 export function reprocessRecording(recordingId: string): Promise<ProcessingRequestResponse> {

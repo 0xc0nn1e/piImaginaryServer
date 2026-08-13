@@ -121,4 +121,57 @@ describe("application routes", () => {
     expect(container.querySelector("img")).not.toBeInTheDocument();
     expect(container.querySelector(".status-badge")).toHaveTextContent("已完成");
   });
+
+  it("uploads multiple audio files strictly in order and continues after one failure", async () => {
+    window.localStorage.setItem("wave-archive-locale", "zh-HK");
+    window.history.replaceState({}, "", "/recordings");
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    const uploadOrder: string[] = [];
+    let activeUploads = 0;
+    let maxActiveUploads = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-12T08:00:00Z" });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        return jsonResponse({ items: [], limit: 20, offset: 0 });
+      }
+      if (path === "/api/v1/web/recordings") {
+        activeUploads += 1;
+        maxActiveUploads = Math.max(maxActiveUploads, activeUploads);
+        const file = (init?.body as FormData).get("audio") as File;
+        uploadOrder.push(file.name);
+        await Promise.resolve();
+        activeUploads -= 1;
+        if (file.name === "first.wav") {
+          return jsonResponse({ error: { code: "invalid", message: "bad file" } }, 415);
+        }
+        return jsonResponse({ recording_id: "recording-2", status: "queued", duplicate: false }, 201);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    const { container } = render(<App />);
+    await browser.click(await screen.findByRole("button", { name: "上載音訊" }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    await browser.upload(input, [
+      new File(["one"], "first.wav", { type: "audio/wav", lastModified: 1 }),
+      new File(["two"], "second.mp3", { type: "audio/mpeg", lastModified: 2 }),
+    ]);
+    await browser.click(screen.getByRole("button", { name: "開始上載" }));
+
+    await waitFor(() => expect(uploadOrder).toEqual(["first.wav", "second.mp3"]));
+    expect(maxActiveUploads).toBe(1);
+    expect(await screen.findByText("上載失敗；系統會繼續處理下一個檔案。")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "開啟結果" })).toHaveAttribute(
+      "href",
+      "/recordings/recording-2",
+    );
+  });
 });

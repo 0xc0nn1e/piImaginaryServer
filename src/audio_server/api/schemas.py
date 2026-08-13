@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from audio_server.db.models import AnalysisStatus, JobStage, JobStatus, RecordingStatus
+from audio_server.db.models import AnalysisStatus, JobKind, JobStage, JobStatus, RecordingStatus
 
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -109,6 +109,7 @@ class JobError(BaseModel):
 
 class JobStatusResponse(BaseModel):
     id: uuid.UUID
+    kind: JobKind
     status: JobStatus
     stage: JobStage
     attempt_count: int
@@ -126,6 +127,7 @@ class RecordingStatusResponse(BaseModel):
 
 
 class TranscriptSegmentResponse(BaseModel):
+    id: uuid.UUID
     sequence: int
     speaker_label: str
     start_time: float
@@ -139,8 +141,96 @@ class TranscriptSegmentResponse(BaseModel):
 class TranscriptResponse(BaseModel):
     recording_id: uuid.UUID
     status: RecordingStatus
+    revision: int
     text: str
     segments: list[TranscriptSegmentResponse]
+
+
+class TranscriptSegmentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    speaker_label: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    start_time: float = Field(ge=0)
+    end_time: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=100_000)
+
+    @field_validator("speaker_label", "text")
+    @classmethod
+    def strip_nonempty_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value cannot be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> TranscriptSegmentUpdate:
+        if not isfinite(self.start_time) or not isfinite(self.end_time):
+            raise ValueError("timestamps must be finite")
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time must be after start_time")
+        return self
+
+
+class TranscriptUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    segments: list[TranscriptSegmentUpdate]
+
+
+class BilingualDescription(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ja: str = Field(min_length=1, max_length=4000)
+    zh_hk: str = Field(min_length=1, max_length=4000)
+
+
+class BilingualTag(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ja: str = Field(min_length=1, max_length=80)
+    zh_hk: str = Field(min_length=1, max_length=80)
+
+
+class NaturalExpression(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_sequence: int = Field(ge=0)
+    start_time: float = Field(ge=0)
+    speaker_label: str = Field(min_length=1, max_length=64)
+    original_ja: str = Field(min_length=1, max_length=1000)
+    translation_zh_hk: str = Field(min_length=1, max_length=1000)
+    usage_ja: str = Field(min_length=1, max_length=2000)
+    usage_zh_hk: str = Field(min_length=1, max_length=2000)
+
+
+class AnalysisHighlight(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    segment_sequence: int = Field(ge=0)
+    start_time: float = Field(ge=0)
+    speaker_label: str = Field(min_length=1, max_length=64)
+    original_ja: str = Field(min_length=1, max_length=1000)
+    translation_zh_hk: str = Field(min_length=1, max_length=1000)
+    reason_ja: str = Field(min_length=1, max_length=2000)
+    reason_zh_hk: str = Field(min_length=1, max_length=2000)
+
+
+class AnalysisResultV2(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: BilingualDescription
+    tags: list[BilingualTag] = Field(max_length=12)
+    natural_expressions: list[NaturalExpression] = Field(max_length=20)
+    highlights: list[AnalysisHighlight] = Field(max_length=12)
+
+
+class AnalysisUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    result: AnalysisResultV2
 
 
 class AnalysisResponse(BaseModel):
@@ -149,7 +239,9 @@ class AnalysisResponse(BaseModel):
     provider: str
     model: str | None
     schema_version: str
-    result: dict[str, Any] | None
+    revision: int
+    result: AnalysisResultV2 | None
+    job: JobStatusResponse | None = None
     error: dict[str, str] | None = None
 
 

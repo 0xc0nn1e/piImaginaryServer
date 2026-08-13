@@ -13,6 +13,7 @@ from audio_server.core.database import create_database
 from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
+    JobKind,
     Recording,
     TranscriptSegment,
 )
@@ -24,9 +25,22 @@ from audio_server.jobs.worker import (
     WorkerIntervals,
     make_worker_id,
 )
-from audio_server.processing.analysis import DisabledAnalysisProvider
+from audio_server.processing.analysis import (
+    DisabledAnalysisProvider,
+    LMStudioAnalysisProvider,
+    LMStudioSettings,
+)
 from audio_server.processing.audio import AudioProcessor, FFmpegSettings
-from audio_server.processing.contracts import DiarizationProvider, PipelineResult
+from audio_server.processing.contracts import (
+    AnalysisProvider,
+    AnalysisResult,
+    DiarizationProvider,
+    MergedTranscriptSegment,
+    PipelineResult,
+)
+from audio_server.processing.contracts import (
+    AnalysisStatus as PipelineAnalysisStatus,
+)
 from audio_server.processing.diarization import (
     DisabledDiarizationProvider,
     PyannoteDiarizationProvider,
@@ -47,12 +61,16 @@ class PipelineJobProcessor:
         session_factory: Callable[[], Session],
         storage: StorageBackend,
         pipeline: ProcessingPipeline,
+        analysis_provider: AnalysisProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._pipeline = pipeline
+        self._analysis_provider = analysis_provider or DisabledAnalysisProvider()
 
     def __call__(self, claim: ClaimedJob, progress: ProgressCallback) -> ResultPersister:
+        if claim.kind is JobKind.ANALYSIS:
+            return self._process_analysis(claim)
         with self._session_factory() as session:
             recording = session.scalar(select(Recording).where(Recording.id == claim.recording_id))
             if recording is None:
@@ -93,9 +111,44 @@ class PipelineJobProcessor:
 
         return _result_persister(claim, result)
 
+    def _process_analysis(self, claim: ClaimedJob) -> ResultPersister:
+        with self._session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(TranscriptSegment)
+                    .where(TranscriptSegment.recording_id == claim.recording_id)
+                    .order_by(TranscriptSegment.sequence)
+                )
+            )
+        transcript = tuple(
+            MergedTranscriptSegment(
+                sequence=row.sequence,
+                speaker_label=row.speaker_label,
+                start=row.start_time,
+                end=row.end_time,
+                text=row.text,
+                language=row.language,
+                confidence=row.confidence,
+                has_overlap=row.has_overlap,
+            )
+            for row in rows
+        )
+        result = self._analysis_provider.analyze(str(claim.recording_id), transcript)
+        if result.status is PipelineAnalysisStatus.FAILED:
+            raise PermanentProcessingError(
+                code=result.error_code or "analysis_failed",
+                safe_message=result.error_message or "Transcript analysis failed.",
+            )
+        return _analysis_result_persister(claim, result)
+
 
 def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersister:
     def persist(session: Session) -> None:
+        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        if recording is None:
+            raise PermanentProcessingError(
+                code="recording_missing", safe_message="The recording metadata is unavailable."
+            )
         session.execute(
             delete(TranscriptSegment).where(TranscriptSegment.recording_id == claim.recording_id)
         )
@@ -116,21 +169,62 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
                 for segment in result.transcript
             ]
         )
+        recording.transcript_revision += 1
         analysis_status = AnalysisStatus(result.analysis.status.value)
-        session.add(
-            Analysis(
+        analysis = session.scalar(
+            select(Analysis).where(Analysis.recording_id == claim.recording_id).with_for_update()
+        )
+        if analysis is None:
+            analysis = Analysis(
                 recording_id=claim.recording_id,
                 job_id=claim.id,
                 provider=result.analysis.provider,
-                model=result.analysis.model,
-                schema_version=str(result.analysis.schema_version),
                 status=analysis_status,
-                result=dict(result.analysis.data) if result.analysis.data is not None else None,
-                error_code=result.analysis.error_code,
-                error_message=result.analysis.error_message,
-                completed_at=datetime.now(UTC),
             )
+            session.add(analysis)
+        analysis.job_id = claim.id
+        analysis.provider = result.analysis.provider
+        analysis.model = result.analysis.model
+        analysis.schema_version = str(result.analysis.schema_version)
+        analysis.status = analysis_status
+        analysis.result = dict(result.analysis.data) if result.analysis.data is not None else None
+        analysis.error_code = result.analysis.error_code
+        analysis.error_message = result.analysis.error_message
+        analysis.completed_at = datetime.now(UTC)
+        recording.analysis_revision += 1
+
+    return persist
+
+
+def _analysis_result_persister(claim: ClaimedJob, result: AnalysisResult) -> ResultPersister:
+    def persist(session: Session) -> None:
+        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        if recording is None:
+            raise PermanentProcessingError(
+                code="recording_missing", safe_message="The recording metadata is unavailable."
+            )
+        analysis = session.scalar(
+            select(Analysis).where(Analysis.recording_id == claim.recording_id).with_for_update()
         )
+        status = AnalysisStatus(result.status.value)
+        if analysis is None:
+            analysis = Analysis(
+                recording_id=claim.recording_id,
+                job_id=claim.id,
+                provider=result.provider,
+                status=status,
+            )
+            session.add(analysis)
+        analysis.job_id = claim.id
+        analysis.provider = result.provider
+        analysis.model = result.model
+        analysis.schema_version = str(result.schema_version)
+        analysis.status = status
+        analysis.result = dict(result.data) if result.data is not None else None
+        analysis.error_code = result.error_code
+        analysis.error_message = result.error_message
+        analysis.completed_at = datetime.now(UTC)
+        recording.analysis_revision += 1
 
     return persist
 
@@ -150,12 +244,14 @@ def build_worker(worker_index: int) -> Worker:
     )
 
     def processor_factory() -> JobProcessor:
-        pipeline = _build_pipeline(settings)
+        analysis_provider = _build_analysis_provider(settings)
+        pipeline = _build_pipeline(settings, analysis_provider=analysis_provider)
         pipeline.load_providers()
         return PipelineJobProcessor(
             session_factory=database.session_factory,
             storage=storage,
             pipeline=pipeline,
+            analysis_provider=analysis_provider,
         )
 
     return Worker(
@@ -169,7 +265,9 @@ def build_worker(worker_index: int) -> Worker:
     )
 
 
-def _build_pipeline(settings: Settings) -> ProcessingPipeline:
+def _build_pipeline(
+    settings: Settings, *, analysis_provider: AnalysisProvider | None = None
+) -> ProcessingPipeline:
     audio_processor = AudioProcessor(
         FFmpegSettings(
             ffmpeg_binary=settings.ffmpeg_binary,
@@ -200,14 +298,28 @@ def _build_pipeline(settings: Settings) -> ProcessingPipeline:
     else:
         diarization_provider = DisabledDiarizationProvider()
 
-    if settings.llm_enabled:
-        raise ProviderConfigurationError(
-            code="analysis_provider_unavailable",
-            safe_message="The configured LLM analysis provider is not implemented in this MVP.",
-        )
     return ProcessingPipeline(
         audio_processor=audio_processor,
         transcription_provider=transcription_provider,
         diarization_provider=diarization_provider,
-        analysis_provider=DisabledAnalysisProvider(),
+        analysis_provider=analysis_provider or _build_analysis_provider(settings),
+    )
+
+
+def _build_analysis_provider(settings: Settings) -> AnalysisProvider:
+    if not settings.llm_enabled:
+        return DisabledAnalysisProvider()
+    if settings.llm_provider != "lmstudio":
+        raise ProviderConfigurationError(
+            code="analysis_provider_invalid",
+            safe_message="The configured LLM analysis provider is unsupported.",
+        )
+    return LMStudioAnalysisProvider(
+        LMStudioSettings(
+            host=settings.lm_studio_host,
+            api_key=settings.lm_studio_api_key.get_secret_value(),
+            timeout_seconds=settings.lm_studio_timeout_seconds,
+            chunk_chars=settings.lm_studio_chunk_chars,
+            max_tokens=settings.lm_studio_max_tokens,
+        )
     )

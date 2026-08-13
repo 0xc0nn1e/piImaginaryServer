@@ -14,13 +14,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from audio_server.activity.repository import append_activity
-from audio_server.api.schemas import ClientRecordingMetadata
+from audio_server.api.schemas import (
+    AnalysisResultV2,
+    ClientRecordingMetadata,
+    TranscriptSegmentUpdate,
+)
 from audio_server.db.activity_models import (
     ProcessingActivity,
     ProcessingActivityType,
 )
 from audio_server.db.models import (
     Analysis,
+    AnalysisStatus,
+    JobKind,
     JobStage,
     JobStatus,
     ProcessingJob,
@@ -155,6 +161,91 @@ class RecordingService:
             self._storage.discard_staged(staged)
             raise
 
+    def ingest_web(
+        self,
+        *,
+        source: BinaryIO,
+        filename: str,
+        started_at: datetime | None,
+    ) -> IngestResult:
+        """Ingest a browser MP3/WAV upload without trusting its filename or MIME type."""
+
+        if started_at is not None and (
+            started_at.tzinfo is None or started_at.utcoffset() is None
+        ):
+            raise RecordingServiceError(
+                "started_at_invalid",
+                "Recording start time must include a timezone offset.",
+                status_code=422,
+            )
+        try:
+            staged = self._storage.create_staged_upload(source, max_bytes=self._max_upload_bytes)
+        except UploadTooLargeError as exc:
+            raise RecordingServiceError(
+                "upload_too_large",
+                "Uploaded audio exceeds the configured size limit.",
+                status_code=413,
+            ) from exc
+
+        identifier = uuid.uuid4()
+        upload_time = datetime.now(UTC)
+        final_key: str | None = None
+        try:
+            probe = self._probe(staged)
+            if probe.preferred_extension not in {".mp3", ".wav"}:
+                raise RecordingServiceError(
+                    "web_audio_type_unsupported",
+                    "Browser uploads must be valid MP3 or WAV audio.",
+                    status_code=415,
+                )
+            with self._session_factory() as session:
+                duplicate = self._find_web_duplicate(session, staged.sha256)
+                if duplicate is not None:
+                    self._preserve_duplicate_upload(staged, duplicate)
+                    logger.info(
+                        "web recording upload deduplicated",
+                        extra={"recording_id": str(duplicate.id)},
+                    )
+                    return IngestResult(recording=duplicate, duplicate=True)
+
+            effective_start = started_at or upload_time
+            final_key = original_storage_key(identifier, effective_start, probe.preferred_extension)
+            self._storage.put_original(staged, final_key)
+            try:
+                result = self._create_web_recording_and_job(
+                    identifier=identifier,
+                    filename=filename,
+                    started_at=effective_start,
+                    upload_time=upload_time,
+                    staged=staged,
+                    probe=probe,
+                    storage_key=final_key,
+                )
+            except Exception:
+                # This UUID-derived key cannot belong to another recording. If
+                # durable metadata/job creation fails, do not leave an orphaned
+                # original behind after returning an error to the browser.
+                self._storage.delete(final_key)
+                raise
+            logger.info(
+                "web recording uploaded",
+                extra={"recording_id": str(result.recording.id)},
+            )
+            return result
+        except RecordingServiceError:
+            self._storage.discard_staged(staged)
+            raise
+        except StorageConflictError as exc:
+            self._storage.discard_staged(staged)
+            raise RecordingServiceError(
+                "storage_identity_conflict",
+                "Stored audio conflicts with the uploaded recording identity.",
+                status_code=409,
+            ) from exc
+        except Exception:
+            self._storage.discard_staged(staged)
+            raise
+
     def list_recordings(
         self,
         *,
@@ -237,6 +328,195 @@ class RecordingService:
                 )
             return analysis
 
+    def get_analysis_state(
+        self, recording_id: uuid.UUID
+    ) -> tuple[Recording, Analysis, ProcessingJob | None]:
+        with self._session_factory() as session:
+            recording = session.get(Recording, recording_id)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            analysis = session.scalar(
+                select(Analysis).where(Analysis.recording_id == recording_id).limit(1)
+            )
+            if analysis is None:
+                raise RecordingServiceError(
+                    "analysis_not_ready", "Analysis is not available yet.", status_code=409
+                )
+            job = session.scalar(
+                select(ProcessingJob)
+                .where(
+                    ProcessingJob.recording_id == recording_id,
+                    ProcessingJob.kind == JobKind.ANALYSIS,
+                )
+                .order_by(ProcessingJob.created_at.desc(), ProcessingJob.id.desc())
+                .limit(1)
+            )
+            if job is not None and job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+                is_current_result_job = job.id == analysis.job_id
+                failed_after_result = (
+                    job.status is JobStatus.FAILED
+                    and job.finished_at is not None
+                    and (
+                        analysis.completed_at is None
+                        or job.finished_at > analysis.completed_at
+                    )
+                )
+                if not is_current_result_job and not failed_after_result:
+                    job = None
+            return recording, analysis, job
+
+    def update_transcript(
+        self,
+        recording_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        updates: list[TranscriptSegmentUpdate],
+    ) -> tuple[Recording, list[TranscriptSegment]]:
+        with self._session_factory.begin() as session:
+            recording = session.get(Recording, recording_id, with_for_update=True)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            if recording.transcript_revision != expected_revision:
+                raise RecordingServiceError(
+                    "transcript_revision_conflict",
+                    "The transcript changed in another session. Reload before saving.",
+                    status_code=409,
+                )
+            self._reject_active_job(session, recording_id)
+            segments = list(
+                session.scalars(
+                    select(TranscriptSegment)
+                    .where(TranscriptSegment.recording_id == recording_id)
+                    .with_for_update()
+                )
+            )
+            existing_by_id = {segment.id: segment for segment in segments}
+            update_ids = [item.id for item in updates]
+            if len(update_ids) != len(set(update_ids)) or set(update_ids) != set(existing_by_id):
+                raise RecordingServiceError(
+                    "transcript_segments_incomplete",
+                    "The complete current transcript segment list is required.",
+                    status_code=422,
+                )
+            ordered = sorted(
+                updates, key=lambda item: (item.start_time, item.end_time, str(item.id))
+            )
+            if any(item.end_time > recording.duration_seconds for item in ordered):
+                raise RecordingServiceError(
+                    "transcript_time_out_of_range",
+                    "Transcript timestamps must stay within the recording duration.",
+                    status_code=422,
+                )
+            for temporary_sequence, segment in enumerate(segments, start=1):
+                segment.sequence = -temporary_sequence
+            session.flush()
+            for sequence, item in enumerate(ordered):
+                segment = existing_by_id[item.id]
+                segment.sequence = sequence
+                segment.speaker_label = item.speaker_label
+                segment.start_time = item.start_time
+                segment.end_time = item.end_time
+                segment.text = item.text
+                segment.confidence = None
+                segment.has_overlap = any(
+                    other.id != item.id
+                    and item.start_time < other.end_time
+                    and other.start_time < item.end_time
+                    for other in ordered
+                )
+            recording.transcript_revision += 1
+            analysis = session.scalar(
+                select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
+            )
+            if analysis is not None:
+                analysis.status = AnalysisStatus.STALE
+                analysis.error_code = None
+                analysis.error_message = None
+                recording.analysis_revision += 1
+            session.flush()
+            return recording, sorted(segments, key=lambda segment: segment.sequence)
+
+    def update_analysis(
+        self,
+        recording_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        result: AnalysisResultV2,
+    ) -> tuple[Recording, Analysis]:
+        with self._session_factory.begin() as session:
+            recording = session.get(Recording, recording_id, with_for_update=True)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            if recording.analysis_revision != expected_revision:
+                raise RecordingServiceError(
+                    "analysis_revision_conflict",
+                    "The analysis changed in another session. Reload before saving.",
+                    status_code=409,
+                )
+            self._reject_active_job(session, recording_id)
+            segments = list(
+                session.scalars(
+                    select(TranscriptSegment).where(TranscriptSegment.recording_id == recording_id)
+                )
+            )
+            grounded = _ground_analysis_result(result, segments)
+            analysis = session.scalar(
+                select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
+            )
+            if analysis is None:
+                latest_job = session.scalar(
+                    select(ProcessingJob)
+                    .where(ProcessingJob.recording_id == recording_id)
+                    .order_by(ProcessingJob.created_at.desc(), ProcessingJob.id.desc())
+                    .limit(1)
+                )
+                if latest_job is None:
+                    raise RecordingServiceError(
+                        "analysis_not_ready", "Analysis is not available yet.", status_code=409
+                    )
+                analysis = Analysis(
+                    recording_id=recording_id,
+                    job_id=latest_job.id,
+                    provider="manual",
+                    schema_version="2",
+                    status=AnalysisStatus.COMPLETED,
+                )
+                session.add(analysis)
+            analysis.provider = "manual"
+            analysis.model = None
+            analysis.schema_version = "2"
+            analysis.status = AnalysisStatus.COMPLETED
+            analysis.result = grounded.model_dump(mode="json")
+            analysis.error_code = None
+            analysis.error_message = None
+            analysis.completed_at = datetime.now(UTC)
+            recording.analysis_revision += 1
+            session.flush()
+            return recording, analysis
+
+    @staticmethod
+    def _reject_active_job(session: Session, recording_id: uuid.UUID) -> None:
+        active_job = session.scalar(
+            select(ProcessingJob.id)
+            .where(
+                ProcessingJob.recording_id == recording_id,
+                ProcessingJob.status.in_([JobStatus.QUEUED, JobStatus.PROCESSING]),
+            )
+            .limit(1)
+        )
+        if active_job is not None:
+            raise RecordingServiceError(
+                "job_already_active",
+                "Wait for the active processing job to finish before saving edits.",
+                status_code=409,
+            )
+
     def retry(self, recording_id: uuid.UUID) -> ProcessingJob:
         return self._enqueue_processing(
             recording_id,
@@ -258,6 +538,16 @@ class RecordingService:
             ),
             disallowed_code="recording_not_reprocessable",
             disallowed_message="Only a completed or failed recording can be reprocessed.",
+            kind=JobKind.FULL,
+        )
+
+    def reprocess_analysis(self, recording_id: uuid.UUID) -> ProcessingJob:
+        return self._enqueue_processing(
+            recording_id,
+            allowed_statuses=frozenset({RecordingStatus.COMPLETED}),
+            disallowed_code="analysis_not_reprocessable",
+            disallowed_message="Analysis can be queued after transcription completes.",
+            kind=JobKind.ANALYSIS,
         )
 
     def delete_recording(self, recording_id: uuid.UUID) -> None:
@@ -363,6 +653,8 @@ class RecordingService:
         allowed_statuses: frozenset[RecordingStatus],
         disallowed_code: str,
         disallowed_message: str,
+        kind: JobKind = JobKind.FULL,
+        require_transcript: bool = False,
     ) -> ProcessingJob:
         now = datetime.now(UTC)
         with self._session_factory.begin() as session:
@@ -389,20 +681,35 @@ class RecordingService:
                     "A processing job is already active for this recording.",
                     status_code=409,
                 )
+            if require_transcript:
+                has_transcript = session.scalar(
+                    select(TranscriptSegment.id)
+                    .where(TranscriptSegment.recording_id == recording_id)
+                    .limit(1)
+                )
+                if has_transcript is None:
+                    raise RecordingServiceError(
+                        "transcript_not_ready",
+                        "Transcript is not available yet.",
+                        status_code=409,
+                    )
             job = ProcessingJob(
                 recording_id=recording.id,
+                kind=kind,
                 status=JobStatus.QUEUED,
                 stage=JobStage.QUEUED,
                 max_attempts=self._max_attempts,
                 available_at=now,
             )
-            recording.processing_status = RecordingStatus.QUEUED
+            if kind is JobKind.FULL:
+                recording.processing_status = RecordingStatus.QUEUED
             session.add(job)
             session.flush()
             append_activity(
                 session,
                 recording_id=recording.id,
                 job_id=job.id,
+                job_kind=kind,
                 event_type=ProcessingActivityType.MANUAL_RETRY_QUEUED,
                 job_status=JobStatus.QUEUED,
                 stage=JobStage.QUEUED,
@@ -411,8 +718,12 @@ class RecordingService:
                 occurred_at=now,
             )
             logger.info(
-                "processing reprocess queued",
-                extra={"recording_id": str(recording.id), "job_id": str(job.id)},
+                "processing job queued",
+                extra={
+                    "recording_id": str(recording.id),
+                    "job_id": str(job.id),
+                    "job_kind": kind.value,
+                },
             )
             return job
 
@@ -553,6 +864,7 @@ class RecordingService:
         )
         job = ProcessingJob(
             recording_id=recording.id,
+            kind=JobKind.FULL,
             status=JobStatus.QUEUED,
             stage=JobStage.QUEUED,
             max_attempts=self._max_attempts,
@@ -566,6 +878,7 @@ class RecordingService:
                     session,
                     recording_id=recording.id,
                     job_id=job.id,
+                    job_kind=JobKind.FULL,
                     event_type=ProcessingActivityType.JOB_QUEUED,
                     job_status=JobStatus.QUEUED,
                     stage=JobStage.QUEUED,
@@ -592,6 +905,81 @@ class RecordingService:
         )
         return IngestResult(recording=recording, duplicate=False)
 
+    @staticmethod
+    def _find_web_duplicate(session: Session, sha256: str) -> Recording | None:
+        return session.scalar(
+            select(Recording).where(
+                Recording.device_id == "web-upload",
+                Recording.sha256 == sha256,
+            )
+        )
+
+    def _create_web_recording_and_job(
+        self,
+        *,
+        identifier: uuid.UUID,
+        filename: str,
+        started_at: datetime,
+        upload_time: datetime,
+        staged: StagedUpload,
+        probe: AudioProbe,
+        storage_key: str,
+    ) -> IngestResult:
+        recording = Recording(
+            id=identifier,
+            device_id="web-upload",
+            original_filename=_safe_filename(filename),
+            storage_key=storage_key,
+            mime_type=probe.mime_type,
+            audio_format=probe.preferred_extension.lstrip("."),
+            file_size=staged.file_size,
+            sha256=staged.sha256,
+            started_at=started_at,
+            ended_at=started_at + timedelta(seconds=probe.duration_seconds),
+            duration_seconds=probe.duration_seconds,
+            sample_rate=probe.sample_rate,
+            channels=probe.channels,
+            client_metadata={"source": "web-upload", "uploaded_at": upload_time.isoformat()},
+            processing_status=RecordingStatus.QUEUED,
+            audio_delete_after=_retention_date(upload_time, self._audio_retention_days),
+            transcript_delete_after=_retention_date(
+                upload_time, self._transcript_retention_days
+            ),
+        )
+        job = ProcessingJob(
+            recording_id=identifier,
+            kind=JobKind.FULL,
+            status=JobStatus.QUEUED,
+            stage=JobStage.QUEUED,
+            max_attempts=self._max_attempts,
+            available_at=upload_time,
+        )
+        try:
+            with self._session_factory.begin() as session:
+                session.add_all([recording, job])
+                session.flush()
+                append_activity(
+                    session,
+                    recording_id=recording.id,
+                    job_id=job.id,
+                    job_kind=JobKind.FULL,
+                    event_type=ProcessingActivityType.JOB_QUEUED,
+                    job_status=JobStatus.QUEUED,
+                    stage=JobStage.QUEUED,
+                    attempt_count=0,
+                    max_attempts=job.max_attempts,
+                    occurred_at=upload_time,
+                )
+        except IntegrityError:
+            with self._session_factory() as session:
+                duplicate = self._find_web_duplicate(session, staged.sha256)
+                if duplicate is not None:
+                    self._delete_if_unreferenced(session, storage_key)
+                    return IngestResult(recording=duplicate, duplicate=True)
+                self._delete_if_unreferenced(session, storage_key)
+            raise
+        return IngestResult(recording=recording, duplicate=False)
+
     def _delete_if_unreferenced(self, session: Session, storage_key: str) -> None:
         owner_id = session.scalar(select(Recording.id).where(Recording.storage_key == storage_key))
         if owner_id is None:
@@ -607,3 +995,22 @@ def _safe_filename(filename: str) -> str:
 
 def _retention_date(now: datetime, days: int | None) -> datetime | None:
     return None if days is None else now + timedelta(days=days)
+
+
+def _ground_analysis_result(
+    result: AnalysisResultV2, segments: list[TranscriptSegment]
+) -> AnalysisResultV2:
+    segment_by_sequence = {segment.sequence: segment for segment in segments}
+    payload = result.model_dump(mode="json")
+    for collection_name in ("natural_expressions", "highlights"):
+        for item in payload[collection_name]:
+            segment = segment_by_sequence.get(item["segment_sequence"])
+            if segment is None or item["original_ja"] not in segment.text:
+                raise RecordingServiceError(
+                    "analysis_quote_not_grounded",
+                    "Every Japanese quote must occur in its referenced transcript segment.",
+                    status_code=422,
+                )
+            item["start_time"] = segment.start_time
+            item["speaker_label"] = segment.speaker_label
+    return AnalysisResultV2.model_validate(payload)

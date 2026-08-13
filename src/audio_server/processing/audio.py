@@ -18,7 +18,7 @@ from audio_server.processing.errors import (
     RetryableProcessingError,
 )
 
-_INPUT_FORMAT_WHITELIST = "aac,flac,matroska,mov,ogg,wav"
+_INPUT_FORMAT_WHITELIST = "aac,flac,matroska,mov,mp3,ogg,wav"
 _INPUT_PROTOCOL_WHITELIST = "file"
 
 _WAV_FORMAT = frozenset({"wav"})
@@ -27,6 +27,7 @@ _RAW_AAC_FORMAT = frozenset({"aac"})
 _MOV_FORMAT = frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"})
 _OGG_FORMAT = frozenset({"ogg"})
 _MATROSKA_WEBM_FORMAT = frozenset({"matroska", "webm"})
+_MP3_FORMAT = frozenset({"mp3"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +253,8 @@ def _validated_media_identity(codec: str, format_name: str) -> tuple[str, str]:
             return "audio/ogg", ".opus"
         if formats == _MATROSKA_WEBM_FORMAT:
             return "audio/webm", ".webm"
+    if codec == "mp3" and formats == _MP3_FORMAT:
+        return "audio/mpeg", ".mp3"
     raise ValueError("unsupported codec and container combination")
 
 

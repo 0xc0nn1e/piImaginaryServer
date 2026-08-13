@@ -142,7 +142,11 @@ services:
       TORCH_HOME: /models/torch
       LLM_ENABLED: ${LLM_ENABLED:-false}
       LLM_PROVIDER: ${LLM_PROVIDER:-disabled}
-      LLM_API_KEY: ${LLM_API_KEY:-}
+      LM_STUDIO_HOST: ${LM_STUDIO_HOST:-127.0.0.1:1234}
+      LM_STUDIO_API_KEY: ${LM_STUDIO_API_KEY:-}
+      LM_STUDIO_TIMEOUT_SECONDS: ${LM_STUDIO_TIMEOUT_SECONDS:-600}
+      LM_STUDIO_CHUNK_CHARS: ${LM_STUDIO_CHUNK_CHARS:-12000}
+      LM_STUDIO_MAX_TOKENS: ${LM_STUDIO_MAX_TOKENS:-4096}
     depends_on:
       postgres:
         condition: service_healthy

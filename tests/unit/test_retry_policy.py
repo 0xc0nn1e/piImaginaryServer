@@ -16,7 +16,14 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import audio_server.jobs.worker as worker_module
-from audio_server.db.models import Base, JobStatus, ProcessingJob, Recording, RecordingStatus
+from audio_server.db.models import (
+    Base,
+    JobKind,
+    JobStatus,
+    ProcessingJob,
+    Recording,
+    RecordingStatus,
+)
 from audio_server.jobs.queue import (
     ClaimLostError,
     JobFailure,
@@ -361,3 +368,61 @@ def test_queue_retry_and_claim_token_fencing_without_external_services() -> None
         assert job.status is JobStatus.COMPLETED
         assert job.attempt_count == 2
         assert recording.processing_status is RecordingStatus.COMPLETED
+
+
+def test_analysis_job_failure_does_not_change_completed_recording_status() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    now = datetime.now(UTC)
+    recording_id = uuid.uuid4()
+    with factory.begin() as session:
+        session.add(
+            Recording(
+                id=recording_id,
+                device_id="analysis-unit-test",
+                original_filename="sample.wav",
+                storage_key=f"recordings/{recording_id}/original.wav",
+                mime_type="audio/wav",
+                audio_format="wav",
+                file_size=10,
+                sha256="b" * 64,
+                started_at=now,
+                ended_at=now + timedelta(seconds=1),
+                duration_seconds=1,
+                client_metadata={},
+                processing_status=RecordingStatus.COMPLETED,
+            )
+        )
+        job = create_processing_job(
+            session,
+            recording_id=recording_id,
+            kind=JobKind.ANALYSIS,
+            max_attempts=1,
+            available_at=now,
+        )
+
+    queue = JobQueue(factory, worker_id="analysis-worker", lease_duration=timedelta(seconds=10))
+    claim = queue.claim_next(now=now)
+    assert claim is not None and claim.kind is JobKind.ANALYSIS
+    assert queue.fail(
+        claim,
+        JobFailure(
+            code="lmstudio_unavailable",
+            error_type="ProviderUnavailable",
+            message="LM Studio is unavailable.",
+            retryable=False,
+        ),
+        now=now + timedelta(seconds=1),
+    ) is False
+
+    with factory() as session:
+        recording = session.get(Recording, recording_id)
+        stored_job = session.get(ProcessingJob, job.id)
+        assert recording is not None and stored_job is not None
+        assert recording.processing_status is RecordingStatus.COMPLETED
+        assert stored_job.status is JobStatus.FAILED

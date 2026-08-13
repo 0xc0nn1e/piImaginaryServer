@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 ai = [
   "faster-whisper==1.2.1",
+  "lmstudio>=1.6.0b1,<2",
   "pyannote.audio==4.0.7",
 ]
 dev = [

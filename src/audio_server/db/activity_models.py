@@ -19,7 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
-from audio_server.db.models import Base, JobStage, JobStatus, enum_column
+from audio_server.db.models import Base, JobKind, JobStage, JobStatus, enum_column
 
 
 class ProcessingActivityType(enum.StrEnum):
@@ -36,6 +36,7 @@ class ProcessingActivityType(enum.StrEnum):
 _EVENT_VALUES = ", ".join(f"'{item.value}'" for item in ProcessingActivityType)
 _STATUS_VALUES = ", ".join(f"'{item.value}'" for item in JobStatus)
 _STAGE_VALUES = ", ".join(f"'{item.value}'" for item in JobStage)
+_KIND_VALUES = ", ".join(f"'{item.value}'" for item in JobKind)
 
 
 class ProcessingActivity(Base):
@@ -54,6 +55,10 @@ class ProcessingActivity(Base):
         CheckConstraint(
             f"stage IS NULL OR stage IN ({_STAGE_VALUES})",
             name="processing_activity_stage",
+        ),
+        CheckConstraint(
+            f"job_kind IN ({_KIND_VALUES})",
+            name="processing_activity_job_kind",
         ),
         CheckConstraint("attempt_count >= 0", name="processing_activity_attempt_nonnegative"),
         CheckConstraint("max_attempts >= 1", name="processing_activity_max_attempts_positive"),
@@ -103,6 +108,12 @@ class ProcessingActivity(Base):
     )
     job_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("processing_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    job_kind: Mapped[JobKind] = mapped_column(
+        enum_column(JobKind, name="processing_activity_job_kind"),
+        default=JobKind.FULL,
+        server_default="full",
+        nullable=False,
     )
     event_type: Mapped[ProcessingActivityType] = mapped_column(
         enum_column(ProcessingActivityType, name="processing_activity_event_type"),

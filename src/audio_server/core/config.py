@@ -67,7 +67,11 @@ class Settings(BaseSettings):
 
     llm_enabled: bool = False
     llm_provider: str = "disabled"
-    llm_api_key: SecretStr = SecretStr("")
+    lm_studio_host: str = "127.0.0.1:1234"
+    lm_studio_api_key: SecretStr = SecretStr("")
+    lm_studio_timeout_seconds: int = 600
+    lm_studio_chunk_chars: int = 12_000
+    lm_studio_max_tokens: int = 4096
 
     audio_retention_days: int | None = None
     transcript_retention_days: int | None = None
@@ -128,6 +132,9 @@ class Settings(BaseSettings):
         "web_login_max_attempts",
         "web_login_window_seconds",
         "web_login_rate_limit_entries",
+        "lm_studio_timeout_seconds",
+        "lm_studio_chunk_chars",
+        "lm_studio_max_tokens",
     )
     @classmethod
     def positive_integer(cls, value: int) -> int:
@@ -162,6 +169,16 @@ class Settings(BaseSettings):
             raise ValueError("RETRY_MAX_SECONDS must be at least RETRY_BASE_SECONDS")
         if self.llm_enabled and self.llm_provider == "disabled":
             raise ValueError("LLM_PROVIDER must be configured when LLM_ENABLED is true")
+        if self.llm_enabled and self.llm_provider != "lmstudio":
+            raise ValueError("LLM_PROVIDER must be lmstudio when LLM_ENABLED is true")
+        if self.llm_enabled and (
+            not self.lm_studio_host.strip() or ":" not in self.lm_studio_host
+        ):
+            raise ValueError("LM_STUDIO_HOST must use host:port syntax")
+        if not 1000 <= self.lm_studio_chunk_chars <= 100_000:
+            raise ValueError("LM_STUDIO_CHUNK_CHARS must be between 1000 and 100000")
+        if not 256 <= self.lm_studio_max_tokens <= 32768:
+            raise ValueError("LM_STUDIO_MAX_TOKENS must be between 256 and 32768")
         return self
 
 

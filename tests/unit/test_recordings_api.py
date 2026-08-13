@@ -16,6 +16,7 @@ from audio_server.db.activity_models import ProcessingActivity
 from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
+    JobKind,
     JobStatus,
     ProcessingJob,
     Recording,
@@ -267,6 +268,188 @@ def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: by
     analysis = app_client.get(f"/api/v1/recordings/{recording_id}/analysis", headers=auth)
     assert analysis.status_code == 200
     assert analysis.json()["status"] == "skipped"
+
+
+def test_analysis_only_reprocess_keeps_recording_completed(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        job.status = JobStatus.COMPLETED
+        session.add(
+            TranscriptSegment(
+                recording_id=recording_id,
+                job_id=job.id,
+                sequence=0,
+                speaker_label="SPEAKER_00",
+                start_time=0,
+                end_time=1,
+                text="確認します。",
+                language="ja",
+                confidence=0.9,
+                has_overlap=False,
+            )
+        )
+
+    response = app_client.post(
+        f"/api/v1/recordings/{recording_id}/analysis/reprocess",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+    )
+
+    assert response.status_code == 202
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+    transcript = app_client.get(
+        f"/api/v1/recordings/{recording_id}/transcript", headers=auth
+    ).json()
+    transcript_edit = app_client.put(
+        f"/api/v1/recordings/{recording_id}/transcript",
+        headers=auth,
+        json={
+            "expected_revision": transcript["revision"],
+            "segments": [
+                {
+                    "id": transcript["segments"][0]["id"],
+                    "speaker_label": "SPEAKER_00",
+                    "start_time": 0,
+                    "end_time": 1,
+                    "text": "変更しません。",
+                }
+            ],
+        },
+    )
+    assert transcript_edit.status_code == 409
+    assert transcript_edit.json()["error"]["code"] == "job_already_active"
+
+    analysis_edit = app_client.put(
+        f"/api/v1/recordings/{recording_id}/analysis",
+        headers=auth,
+        json={
+            "expected_revision": 0,
+            "result": {
+                "description": {"ja": "確認です。", "zh_hk": "呢段係確認。"},
+                "tags": [],
+                "natural_expressions": [],
+                "highlights": [],
+            },
+        },
+    )
+    assert analysis_edit.status_code == 409
+    assert analysis_edit.json()["error"]["code"] == "job_already_active"
+
+    with app_client.app.state.test_session_factory() as session:
+        recording = session.get(Recording, recording_id)
+        analysis_job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.kind == JobKind.ANALYSIS)
+        )
+        assert recording is not None
+        assert recording.processing_status is RecordingStatus.COMPLETED
+        assert analysis_job is not None and analysis_job.status is JobStatus.QUEUED
+
+
+def test_transcript_and_analysis_updates_are_revisioned_and_grounded(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        job.status = JobStatus.COMPLETED
+        segment = TranscriptSegment(
+            recording_id=recording_id,
+            job_id=job.id,
+            sequence=0,
+            speaker_label="SPEAKER_00",
+            start_time=0,
+            end_time=1,
+            text="一旦こちらで持ち帰ります。",
+            language="ja",
+            confidence=0.9,
+            has_overlap=False,
+        )
+        session.add(segment)
+        session.add(
+            Analysis(
+                recording_id=recording_id,
+                job_id=job.id,
+                provider="disabled",
+                schema_version="2",
+                status=AnalysisStatus.SKIPPED,
+            )
+        )
+        session.flush()
+        segment_id = segment.id
+
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+    transcript_update = app_client.put(
+        f"/api/v1/recordings/{recording_id}/transcript",
+        headers=auth,
+        json={
+            "expected_revision": 0,
+            "segments": [
+                {
+                    "id": str(segment_id),
+                    "speaker_label": "SPEAKER_01",
+                    "start_time": 0.1,
+                    "end_time": 0.9,
+                    "text": "一旦こちらで持ち帰ります。",
+                }
+            ],
+        },
+    )
+    assert transcript_update.status_code == 200
+    assert transcript_update.json()["revision"] == 1
+    analysis = app_client.get(f"/api/v1/recordings/{recording_id}/analysis", headers=auth)
+    assert analysis.json()["status"] == "stale"
+    assert analysis.json()["revision"] == 1
+
+    result = {
+        "description": {"ja": "会議です。", "zh_hk": "呢段係會議。"},
+        "tags": [{"ja": "検討", "zh_hk": "研究"}],
+        "natural_expressions": [
+            {
+                "segment_sequence": 0,
+                "start_time": 999,
+                "speaker_label": "FAKE",
+                "original_ja": "一旦こちらで持ち帰ります。",
+                "translation_zh_hk": "我哋暫時拎返去研究。",
+                "usage_ja": "職場表現です。",
+                "usage_zh_hk": "職場用語。",
+            }
+        ],
+        "highlights": [],
+    }
+    saved = app_client.put(
+        f"/api/v1/recordings/{recording_id}/analysis",
+        headers=auth,
+        json={"expected_revision": 1, "result": result},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == 2
+    expression = saved.json()["result"]["natural_expressions"][0]
+    assert expression["start_time"] == 0.1
+    assert expression["speaker_label"] == "SPEAKER_01"
+
+    conflict = app_client.put(
+        f"/api/v1/recordings/{recording_id}/analysis",
+        headers=auth,
+        json={"expected_revision": 1, "result": result},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "analysis_revision_conflict"
 
 
 def test_completed_silent_recording_returns_empty_transcript(

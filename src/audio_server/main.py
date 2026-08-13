@@ -10,6 +10,7 @@ from audio_server.api.errors import register_error_handlers
 from audio_server.api.health import router as health_router
 from audio_server.api.middleware import MULTIPART_OVERHEAD_BYTES, ApiRequestGuardMiddleware
 from audio_server.api.recordings import router as recordings_router
+from audio_server.api.web_recordings import router as web_recordings_router
 from audio_server.core.config import Settings, get_settings
 from audio_server.core.database import Database, create_database
 from audio_server.core.logging import configure_logging
@@ -87,6 +88,7 @@ def create_app(
     application.add_middleware(
         ApiRequestGuardMiddleware,
         authenticator=authenticator,
+        web_auth_service=web_auth_service,
         max_upload_request_bytes=(
             active_settings.max_upload_bytes
             + active_settings.max_metadata_bytes
@@ -98,6 +100,7 @@ def create_app(
     application.include_router(health_router)
     application.include_router(web_auth_router)
     application.include_router(recordings_router)
+    application.include_router(web_recordings_router)
     application.include_router(activity_router)
     return application
 

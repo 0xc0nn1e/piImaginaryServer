@@ -1,6 +1,7 @@
 export type RecordingStatus = "uploaded" | "queued" | "processing" | "completed" | "failed";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
+export type JobKind = "full" | "analysis";
 
 export type JobStage =
   | "queued"
@@ -62,6 +63,7 @@ export interface JobError {
 
 export interface JobStatusDetails {
   id: string;
+  kind: JobKind;
   status: JobStatus;
   stage: JobStage;
   attempt_count: number;
@@ -87,6 +89,7 @@ export interface ProcessingRequestResponse {
 export interface ActivityItem {
   id: string;
   job_id: string;
+  job_kind: JobKind;
   event_type: string;
   job_status: JobStatus | null;
   stage: JobStage | null;
@@ -107,6 +110,7 @@ export interface ActivityResponse {
 }
 
 export interface TranscriptSegment {
+  id: string;
   sequence: number;
   speaker_label: string;
   start_time: number;
@@ -120,6 +124,61 @@ export interface TranscriptSegment {
 export interface TranscriptResponse {
   recording_id: string;
   status: RecordingStatus;
+  revision: number;
   text: string;
   segments: TranscriptSegment[];
+}
+
+export type AnalysisStatus = "completed" | "skipped" | "failed" | "stale";
+
+export interface BilingualText {
+  ja: string;
+  zh_hk: string;
+}
+
+export interface BilingualTag extends BilingualText {}
+
+export interface NaturalExpression {
+  segment_sequence: number;
+  start_time: number;
+  speaker_label: string;
+  original_ja: string;
+  translation_zh_hk: string;
+  usage_ja: string;
+  usage_zh_hk: string;
+}
+
+export interface AnalysisHighlight {
+  segment_sequence: number;
+  start_time: number;
+  speaker_label: string;
+  original_ja: string;
+  translation_zh_hk: string;
+  reason_ja: string;
+  reason_zh_hk: string;
+}
+
+export interface AnalysisResultV2 {
+  description: BilingualText;
+  tags: BilingualTag[];
+  natural_expressions: NaturalExpression[];
+  highlights: AnalysisHighlight[];
+}
+
+export interface AnalysisResponse {
+  recording_id: string;
+  status: AnalysisStatus;
+  provider: string;
+  model: string | null;
+  schema_version: string;
+  revision: number;
+  result: AnalysisResultV2 | null;
+  job: JobStatusDetails | null;
+  error: { code: string; message: string } | null;
+}
+
+export interface UploadRecordingResponse {
+  recording_id: string;
+  status: RecordingStatus;
+  duplicate: boolean;
 }

@@ -14,6 +14,8 @@ from audio_server.api.dependencies import (
 )
 from audio_server.api.schemas import (
     AnalysisResponse,
+    AnalysisResultV2,
+    AnalysisUpdateRequest,
     ClientRecordingMetadata,
     JobError,
     JobStatusResponse,
@@ -23,9 +25,10 @@ from audio_server.api.schemas import (
     RetryResponse,
     TranscriptResponse,
     TranscriptSegmentResponse,
+    TranscriptUpdateRequest,
     UploadRecordingResponse,
 )
-from audio_server.db.models import RecordingStatus
+from audio_server.db.models import ProcessingJob, RecordingStatus
 from audio_server.services.recording_service import RecordingService, RecordingServiceError
 
 router = APIRouter(
@@ -119,17 +122,7 @@ def get_recording_status(
                 stage=job.failed_stage,
                 at=job.error_at,
             )
-        job_response = JobStatusResponse(
-            id=job.id,
-            status=job.status,
-            stage=job.stage,
-            attempt_count=job.attempt_count,
-            max_attempts=job.max_attempts,
-            available_at=job.available_at,
-            started_at=job.started_at,
-            finished_at=job.finished_at,
-            error=error,
-        )
+        job_response = _job_response(job, error=error)
     return RecordingStatusResponse(
         recording_id=recording.id,
         status=recording.processing_status,
@@ -145,6 +138,7 @@ def get_transcript(
     recording, segments = service.get_transcript(recording_id)
     segment_responses = [
         TranscriptSegmentResponse(
+            id=segment.id,
             sequence=segment.sequence,
             speaker_label=segment.speaker_label,
             start_time=segment.start_time,
@@ -159,6 +153,7 @@ def get_transcript(
     return TranscriptResponse(
         recording_id=recording.id,
         status=recording.processing_status,
+        revision=recording.transcript_revision,
         text=_format_transcript(segment_responses),
         segments=segment_responses,
     )
@@ -169,7 +164,7 @@ def get_analysis(
     recording_id: uuid.UUID,
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> AnalysisResponse:
-    analysis = service.get_analysis(recording_id)
+    recording, analysis, analysis_job = service.get_analysis_state(recording_id)
     error = None
     if analysis.error_code and analysis.error_message:
         error = {"code": analysis.error_code, "message": analysis.error_message}
@@ -179,8 +174,78 @@ def get_analysis(
         provider=analysis.provider,
         model=analysis.model,
         schema_version=analysis.schema_version,
-        result=analysis.result,
+        revision=recording.analysis_revision,
+        result=_structured_analysis(analysis.result),
+        job=_job_response(analysis_job) if analysis_job is not None else None,
         error=error,
+    )
+
+
+@router.post("/{recording_id}/analysis/reprocess", response_model=RetryResponse, status_code=202)
+def reprocess_analysis(
+    recording_id: uuid.UUID,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> RetryResponse:
+    job = service.reprocess_analysis(recording_id)
+    return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.put("/{recording_id}/transcript", response_model=TranscriptResponse)
+def update_transcript(
+    recording_id: uuid.UUID,
+    payload: TranscriptUpdateRequest,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> TranscriptResponse:
+    recording, segments = service.update_transcript(
+        recording_id,
+        expected_revision=payload.expected_revision,
+        updates=payload.segments,
+    )
+    responses = [
+        TranscriptSegmentResponse(
+            id=segment.id,
+            sequence=segment.sequence,
+            speaker_label=segment.speaker_label,
+            start_time=segment.start_time,
+            end_time=segment.end_time,
+            text=segment.text,
+            language=segment.language,
+            confidence=segment.confidence,
+            has_overlap=segment.has_overlap,
+        )
+        for segment in segments
+    ]
+    return TranscriptResponse(
+        recording_id=recording.id,
+        status=recording.processing_status,
+        revision=recording.transcript_revision,
+        text=_format_transcript(responses),
+        segments=responses,
+    )
+
+
+@router.put("/{recording_id}/analysis", response_model=AnalysisResponse)
+def update_analysis(
+    recording_id: uuid.UUID,
+    payload: AnalysisUpdateRequest,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> AnalysisResponse:
+    recording, analysis = service.update_analysis(
+        recording_id,
+        expected_revision=payload.expected_revision,
+        result=payload.result,
+    )
+    return AnalysisResponse(
+        recording_id=recording_id,
+        status=analysis.status,
+        provider=analysis.provider,
+        model=analysis.model,
+        schema_version=analysis.schema_version,
+        revision=recording.analysis_revision,
+        result=_structured_analysis(analysis.result),
     )
 
 
@@ -228,3 +293,36 @@ def _format_transcript(segments: list[TranscriptSegmentResponse]) -> str:
         timestamp = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
         lines.append(f"[{timestamp}] {segment.speaker_label}:\n{segment.text}")
     return "\n\n".join(lines)
+
+
+def _job_response(job: ProcessingJob, *, error: JobError | None = None) -> JobStatusResponse:
+    if error is None and job.error_code and job.error_message:
+        error = JobError(
+            code=job.error_code,
+            type=job.error_type,
+            message=job.error_message,
+            stage=job.failed_stage,
+            at=job.error_at,
+        )
+    return JobStatusResponse(
+        id=job.id,
+        kind=job.kind,
+        status=job.status,
+        stage=job.stage,
+        attempt_count=job.attempt_count,
+        max_attempts=job.max_attempts,
+        available_at=job.available_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        error=error,
+    )
+
+
+def _structured_analysis(result: dict[str, object] | None) -> AnalysisResultV2 | None:
+    if result is None:
+        return None
+    try:
+        return AnalysisResultV2.model_validate(result)
+    except ValueError:
+        # Pre-v2 rows remain readable while callers migrate to the structured contract.
+        return None

@@ -34,7 +34,8 @@ Raspberry Pi / iPhone / future client
                                              │
                                   timestamp/speaker merge
                                              │
-                                    optional analysis
+                                  optional LM Studio analysis
+                                  (transcript only; never audio)
                                              │
                                              ▼
                                       PostgreSQL
@@ -243,7 +244,12 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `PYANNOTE_METRICS_ENABLED` | `0` | Disables pyannote telemetry in the supplied runtime. |
 | `HF_HOME` / `TORCH_HOME` | cache paths | Persistent model-cache roots. |
 | `LLM_ENABLED` | `false` | Optional analysis switch; transcription does not depend on it. |
-| `LLM_PROVIDER` / `LLM_API_KEY` | `disabled` / empty | Reserved provider settings; no paid provider is required by the MVP. |
+| `LLM_PROVIDER` | `disabled` | Set `lmstudio` together with `LLM_ENABLED=true`. |
+| `LM_STUDIO_HOST` | `127.0.0.1:1234` | LM Studio SDK server as `host:port`; from Docker use the 5090 host's trusted-LAN address. |
+| `LM_STUDIO_API_KEY` | empty | Optional LM Studio API token injected only into the worker. |
+| `LM_STUDIO_TIMEOUT_SECONDS` | `600` | Inference inactivity timeout. |
+| `LM_STUDIO_CHUNK_CHARS` | `12000` | Maximum transcript characters per map-analysis chunk. |
+| `LM_STUDIO_MAX_TOKENS` | `4096` | Structured output token cap for every map/reduce layer. |
 | `AUDIO_RETENTION_DAYS` / `TRANSCRIPT_RETENTION_DAYS` | blank/unset | Optional positive policy values; the MVP has no automatic cleanup worker. |
 
 The Compose-only variables `POSTGRES_DB`, `POSTGRES_USER`,
@@ -266,19 +272,19 @@ than an unbounded ingress buffer, remains the final validator.
 The browser UI uses an opaque database-backed session. Login sets an HttpOnly
 `audio_server_session` cookie and a readable SameSite Strict
 `audio_server_csrf` cookie. The SPA reads the CSRF cookie only for logout,
-reprocessing, and deletion and echoes it in `X-CSRF-Token`; it never stores
+browser upload, editing, reprocessing, and deletion and echoes it in
+`X-CSRF-Token`; it never stores
 credentials in `localStorage` or `sessionStorage`. Setup requires the exact
 `WEB_ALLOWED_ORIGIN` plus the
 one-time `WEB_SETUP_TOKEN` in `X-Setup-Token`. Passwords and raw session tokens
 are not stored in plaintext.
 
 An authenticated browser session may read the recording list, metadata,
-status, transcript, analysis, and activity endpoints. Browser reprocessing and
-deletion additionally require the exact configured Origin and CSRF token.
+status, transcript, analysis, and activity endpoints. Browser upload, editing,
+reprocessing, and deletion additionally require the exact configured Origin and CSRF token.
 Bearer-authenticated machine clients may use the same mutation endpoints
 without browser CSRF headers. Upload and the legacy failed-job retry endpoint
-remain machine-Bearer-only. Browser upload and audio playback are deliberately
-absent from the UI.
+remain machine-Bearer-only. Browser audio playback is deliberately absent.
 
 Raspberry Pi and other machine clients send:
 
@@ -424,15 +430,19 @@ must inspect and quarantine repeatedly rejected client items.
 | `GET` | `/api/v1/auth/me` | Return the current web administrator and session expiry. |
 | `POST` | `/api/v1/auth/logout` | Revoke the current session with CSRF validation. |
 | `POST` | `/api/v1/recordings` | Validate, durably store, enqueue, and return immediately. |
+| `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV browser upload. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/status` | Current recording and latest job stage/error state. |
 | `GET` | `/api/v1/recordings/{id}/activity` | Paginated, privacy-safe processing activity. |
 | `GET` | `/api/v1/recordings/{id}/transcript` | Ordered timestamped segments and formatted transcript. |
+| `PUT` | `/api/v1/recordings/{id}/transcript` | Replace all segments using an expected revision. |
 | `POST` | `/api/v1/recordings/{id}/retry` | Create a new job for a terminal failed recording. |
 | `POST` | `/api/v1/recordings/{id}/reprocess` | Re-run a completed/failed recording; browser calls require Origin and CSRF. |
 | `DELETE` | `/api/v1/recordings/{id}` | Permanently delete a terminal recording and its private data. |
 | `GET` | `/api/v1/recordings/{id}/analysis` | Completed, skipped, or failed optional analysis. |
+| `POST` | `/api/v1/recordings/{id}/analysis/reprocess` | Queue analysis only; never reads audio or runs Whisper/pyannote. |
+| `PUT` | `/api/v1/recordings/{id}/analysis` | Replace structured analysis using an expected revision. |
 
 List requests accept `limit` (default 50, maximum 100), `offset`, `device_id`,
 and `status`. Transcript or analysis requests made before the result is ready
@@ -454,9 +464,9 @@ four browser routes:
 
 - `/setup`: one-time administrator creation
 - `/login`: administrator sign-in
-- `/recordings`: paginated and filterable recording list
-- `/recordings/{id}`: metadata, current stage, safe activity, transcript,
-  reprocessing, and confirmed permanent deletion
+- `/recordings`: paginated/filterable list and sequential multi-file MP3/WAV upload
+- `/recordings/{id}`: metadata, current stage, safe activity, editable transcript,
+  bilingual analysis, separate retranscription/reanalysis, and permanent deletion
 
 The interface defaults to Japanese and can be switched to Hong Kong
 Traditional Chinese from the login, setup, desktop sidebar, or mobile header.
@@ -465,9 +475,10 @@ credentials, sessions, CSRF values, and API tokens are not stored there.
 
 Nginx serves the SPA and same-origin proxies `/api` and `/health` to FastAPI.
 The browser therefore needs no API hostname or secret at build or runtime.
-Active recordings poll status and activity every three seconds and stop when
-completed or failed. Transcript text is rendered as text, never injected as
-HTML; copying the full transcript requires an explicit button click.
+Active recordings and analysis-only jobs poll every three seconds. Transcript
+and LLM output are rendered as plain text, never injected as HTML. Transcript
+and analysis saves use optimistic revisions so two tabs cannot silently
+overwrite one another.
 
 Build and test it independently with:
 
@@ -622,15 +633,47 @@ replaced later without changing API routes or provider implementations.
 
 ## Optional analysis
 
-Analysis consumes application transcript objects through an
-`AnalysisProvider` boundary. It is disabled by default and records a skipped
-result; transcription, diarization, and transcript retrieval remain complete.
-The MVP does not require a paid LLM API.
+Analysis consumes only merged transcript segments through an `AnalysisProvider`
+boundary. It is disabled by default and records `skipped`; transcription,
+diarization, and transcript retrieval still complete normally. Enabling it
+uses the official `lmstudio` Python SDK from the worker only. The dependency
+starts at `1.6.0b1`, the first official release with API-token support:
 
-Future providers may return summaries, action items, decisions, questions,
-technical facts, and difficult workplace Japanese with Cantonese explanations.
-That work belongs to the analysis layer and must not alter transcription or
-speaker merge data.
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=lmstudio
+LM_STUDIO_HOST=192.168.51.10:1234
+LM_STUDIO_API_KEY=replace-with-lm-studio-token
+LM_STUDIO_TIMEOUT_SECONDS=600
+LM_STUDIO_CHUNK_CHARS=12000
+LM_STUDIO_MAX_TOKENS=4096
+```
+
+On the 5090 computer, enable LM Studio's server and **Serve on Local Network**,
+enable API-token authentication, and create a least-privilege token that can
+list loaded models and run inference. Firewall the port to the audio server's
+trusted LAN address. Docker must use the 5090 computer's LAN address, not
+`127.0.0.1`; test routing from the worker container. Load exactly one LLM in
+the LM Studio GUI. The worker lists already loaded LLMs and uses the only
+handle without providing a model name, downloading a model, or loading one.
+Zero or multiple loaded LLMs produce a safe visible failure.
+
+See LM Studio's official documentation for [server settings](https://lmstudio.ai/docs/developer/core/server/settings),
+[authentication](https://lmstudio.ai/docs/developer/core/authentication),
+[listing loaded models](https://lmstudio.ai/docs/python/manage-models/list-loaded),
+and [structured responses](https://lmstudio.ai/docs/python/llm-prediction/structured-response).
+
+Long transcripts are split by segments into bounded chunks and combined with
+hierarchical structured map/reduce. Every response layer is Pydantic-validated;
+Japanese quotes must occur in the referenced transcript segment, and the
+server—not the model—adds timestamps and speaker labels. Logs never contain
+prompts, transcripts, responses, or token content.
+
+The original audio and normalized WAV always remain on this audio server. Only
+transcript text crosses the trusted LAN to LM Studio. A 5090 accelerates this
+LLM analysis; it does not accelerate faster-whisper unless the worker itself is
+separately rebuilt/configured for that GPU. The analysis-only endpoint reads
+the transcript from PostgreSQL and never touches audio, Whisper, or pyannote.
 
 ## Database migrations
 

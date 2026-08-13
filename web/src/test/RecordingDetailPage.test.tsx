@@ -181,10 +181,10 @@ describe("recording transcript states", () => {
     const browser = userEvent.setup();
 
     render(<App />);
-    await browser.click(await screen.findByRole("button", { name: "重新分析" }));
+    await browser.click(await screen.findByRole("button", { name: "重新轉錄" }));
 
     expect(
-      await screen.findByText("已安排重新分析；舊逐字稿會保留到新結果成功完成。"),
+      await screen.findByText("已安排重新轉錄；新結果完成前會保留舊有內容。"),
     ).toBeInTheDocument();
     const mutation = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/reprocess"));
     expect(mutation?.[1]?.method).toBe("POST");

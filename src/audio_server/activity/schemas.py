@@ -8,7 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from audio_server.db.activity_models import ProcessingActivityType
-from audio_server.db.models import JobStage, JobStatus
+from audio_server.db.models import JobKind, JobStage, JobStatus
 
 
 class ProcessingActivityResponse(BaseModel):
@@ -16,6 +16,7 @@ class ProcessingActivityResponse(BaseModel):
 
     id: uuid.UUID
     job_id: uuid.UUID
+    job_kind: JobKind
     event_type: ProcessingActivityType
     job_status: JobStatus | None
     stage: JobStage | None

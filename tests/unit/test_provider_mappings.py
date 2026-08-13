@@ -23,7 +23,7 @@ from audio_server.processing.transcription import (
     FasterWhisperSettings,
 )
 
-_FORMAT_WHITELIST = "aac,flac,matroska,mov,ogg,wav"
+_FORMAT_WHITELIST = "aac,flac,matroska,mov,mp3,ogg,wav"
 
 
 def _probe_payload(codec: str, format_name: str) -> dict[str, object]:
@@ -161,6 +161,7 @@ def test_audio_probe_failure_never_exposes_ffprobe_output(
         ),
         ("opus", "ogg", "audio/ogg", ".opus"),
         ("opus", "matroska,webm", "audio/webm", ".webm"),
+        ("mp3", "mp3", "audio/mpeg", ".mp3"),
     ],
 )
 def test_audio_probe_accepts_only_documented_codec_container_pairs(

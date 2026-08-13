@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from audio_server.db.activity_models import ProcessingActivity, ProcessingActivityType
-from audio_server.db.models import JobStage, JobStatus, Recording
+from audio_server.db.models import JobKind, JobStage, JobStatus, Recording
 
 _SAFE_IDENTIFIER = re.compile(r"[^a-zA-Z0-9_.-]+")
 
@@ -20,6 +20,7 @@ def append_activity(
     *,
     recording_id: uuid.UUID,
     job_id: uuid.UUID,
+    job_kind: JobKind = JobKind.FULL,
     event_type: ProcessingActivityType,
     job_status: JobStatus | None,
     stage: JobStage | None,
@@ -56,6 +57,7 @@ def append_activity(
     activity = ProcessingActivity(
         recording_id=recording_id,
         job_id=job_id,
+        job_kind=job_kind,
         event_type=event_type,
         job_status=job_status,
         stage=stage,

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from audio_server.activity.repository import append_activity
 from audio_server.db.activity_models import ProcessingActivityType
 from audio_server.db.models import (
+    JobKind,
     JobStage,
     JobStatus,
     ProcessingJob,
@@ -58,6 +59,7 @@ class ClaimedJob:
 
     id: uuid.UUID
     recording_id: uuid.UUID
+    kind: JobKind
     claim_token: uuid.UUID
     worker_id: str
     attempt_count: int
@@ -163,6 +165,7 @@ def create_processing_job(
     recording_id: uuid.UUID,
     max_attempts: int = 3,
     available_at: datetime | None = None,
+    kind: JobKind = JobKind.FULL,
 ) -> ProcessingJob:
     """Create a queued job inside the caller's existing transaction.
 
@@ -188,19 +191,22 @@ def create_processing_job(
 
     job = ProcessingJob(
         recording_id=recording_id,
+        kind=kind,
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
         attempt_count=0,
         max_attempts=max_attempts,
         available_at=queued_at,
     )
-    recording.processing_status = RecordingStatus.QUEUED
+    if kind is JobKind.FULL:
+        recording.processing_status = RecordingStatus.QUEUED
     session.add(job)
     session.flush()
     append_activity(
         session,
         recording_id=recording_id,
         job_id=job.id,
+        job_kind=kind,
         event_type=ProcessingActivityType.JOB_QUEUED,
         job_status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
@@ -241,6 +247,7 @@ def retry_failed_recording(
     queued_at = available_at or _utcnow()
     job = ProcessingJob(
         recording_id=recording_id,
+        kind=JobKind.FULL,
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
         attempt_count=0,
@@ -254,6 +261,7 @@ def retry_failed_recording(
         session,
         recording_id=recording_id,
         job_id=job.id,
+        job_kind=JobKind.FULL,
         event_type=ProcessingActivityType.MANUAL_RETRY_QUEUED,
         job_status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
@@ -304,7 +312,9 @@ class JobQueue:
                 return None
 
             job.status = JobStatus.PROCESSING
-            job.stage = JobStage.PREPROCESSING
+            job.stage = (
+                JobStage.ANALYZING if job.kind is JobKind.ANALYSIS else JobStage.PREPROCESSING
+            )
             job.attempt_count += 1
             job.worker_id = self.worker_id
             job.claim_token = token
@@ -318,18 +328,20 @@ class JobQueue:
             job.error_type = None
             job.error_message = None
             job.error_at = None
-            session.execute(
-                update(Recording)
-                .where(Recording.id == job.recording_id)
-                .values(processing_status=RecordingStatus.PROCESSING)
-            )
+            if job.kind is JobKind.FULL:
+                session.execute(
+                    update(Recording)
+                    .where(Recording.id == job.recording_id)
+                    .values(processing_status=RecordingStatus.PROCESSING)
+                )
             append_activity(
                 session,
                 recording_id=job.recording_id,
                 job_id=job.id,
+                job_kind=job.kind,
                 event_type=ProcessingActivityType.PROCESSING_STARTED,
                 job_status=JobStatus.PROCESSING,
-                stage=JobStage.PREPROCESSING,
+                stage=job.stage,
                 attempt_count=job.attempt_count,
                 max_attempts=job.max_attempts,
                 occurred_at=claimed_at,
@@ -337,6 +349,7 @@ class JobQueue:
             claimed = ClaimedJob(
                 id=job.id,
                 recording_id=job.recording_id,
+                kind=job.kind,
                 claim_token=token,
                 worker_id=self.worker_id,
                 attempt_count=job.attempt_count,
@@ -402,6 +415,7 @@ class JobQueue:
                 session,
                 recording_id=claim.recording_id,
                 job_id=claim.id,
+                job_kind=claim.kind,
                 event_type=ProcessingActivityType.STAGE_STARTED,
                 job_status=JobStatus.PROCESSING,
                 stage=next_stage,
@@ -430,15 +444,17 @@ class JobQueue:
             job.heartbeat_at = completed_at
             job.lease_expires_at = None
             job.claim_token = None
-            session.execute(
-                update(Recording)
-                .where(Recording.id == job.recording_id)
-                .values(processing_status=RecordingStatus.COMPLETED)
-            )
+            if job.kind is JobKind.FULL:
+                session.execute(
+                    update(Recording)
+                    .where(Recording.id == job.recording_id)
+                    .values(processing_status=RecordingStatus.COMPLETED)
+                )
             append_activity(
                 session,
                 recording_id=job.recording_id,
                 job_id=job.id,
+                job_kind=job.kind,
                 event_type=ProcessingActivityType.PROCESSING_COMPLETED,
                 job_status=JobStatus.COMPLETED,
                 stage=JobStage.COMPLETED,
@@ -481,15 +497,17 @@ class JobQueue:
                 job.status = JobStatus.QUEUED
                 job.stage = JobStage.QUEUED
                 job.available_at = failed_at + self.retry_policy.delay_after(job.attempt_count)
-                session.execute(
-                    update(Recording)
-                    .where(Recording.id == job.recording_id)
-                    .values(processing_status=RecordingStatus.QUEUED)
-                )
+                if job.kind is JobKind.FULL:
+                    session.execute(
+                        update(Recording)
+                        .where(Recording.id == job.recording_id)
+                        .values(processing_status=RecordingStatus.QUEUED)
+                    )
                 append_activity(
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,
+                    job_kind=job.kind,
                     event_type=ProcessingActivityType.RETRY_SCHEDULED,
                     job_status=JobStatus.QUEUED,
                     stage=failed_stage,
@@ -505,15 +523,17 @@ class JobQueue:
             else:
                 job.status = JobStatus.FAILED
                 job.finished_at = failed_at
-                session.execute(
-                    update(Recording)
-                    .where(Recording.id == job.recording_id)
-                    .values(processing_status=RecordingStatus.FAILED)
-                )
+                if job.kind is JobKind.FULL:
+                    session.execute(
+                        update(Recording)
+                        .where(Recording.id == job.recording_id)
+                        .values(processing_status=RecordingStatus.FAILED)
+                    )
                 append_activity(
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,
+                    job_kind=job.kind,
                     event_type=ProcessingActivityType.PROCESSING_FAILED,
                     job_status=JobStatus.FAILED,
                     stage=failed_stage,
@@ -588,6 +608,7 @@ class JobQueue:
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,
+                    job_kind=job.kind,
                     event_type=ProcessingActivityType.LEASE_RECOVERED,
                     job_status=job.status,
                     stage=failed_stage,
@@ -600,11 +621,12 @@ class JobQueue:
                     retry_scheduled=can_retry,
                     next_attempt_at=job.available_at if can_retry else None,
                 )
-                session.execute(
-                    update(Recording)
-                    .where(Recording.id == job.recording_id)
-                    .values(processing_status=recording_status)
-                )
+                if job.kind is JobKind.FULL:
+                    session.execute(
+                        update(Recording)
+                        .where(Recording.id == job.recording_id)
+                        .values(processing_status=recording_status)
+                    )
         return RecoverySummary(requeued=requeued, failed=failed)
 
     @staticmethod

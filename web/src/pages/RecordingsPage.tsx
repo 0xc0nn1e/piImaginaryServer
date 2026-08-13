@@ -1,7 +1,7 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { ApiError, listRecordings } from "../api";
+import { ApiError, listRecordings, uploadWebRecording } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { LoadingView } from "../components/LoadingView";
 import { StatusBadge } from "../components/StatusBadge";
@@ -11,6 +11,22 @@ import type { RecordingListResponse, RecordingStatus } from "../types";
 
 const PAGE_SIZE = 20;
 const validStatuses = new Set(["uploaded", "queued", "processing", "completed", "failed"]);
+
+type UploadStatus = "waiting" | "uploading" | "queued" | "failed";
+interface UploadItem {
+  id: string;
+  file: File;
+  startedAt: string;
+  status: UploadStatus;
+  recordingId?: string;
+  error?: string;
+}
+
+function localInputTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
 
 export function RecordingsPage() {
   const navigate = useNavigate();
@@ -26,6 +42,11 @@ export function RecordingsPage() {
   const [data, setData] = useState<RecordingListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,7 +71,76 @@ export function RecordingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [deviceId, invalidate, navigate, offset, status, t]);
+  }, [deviceId, invalidate, navigate, offset, refreshKey, status, t]);
+
+  function addFiles(files: FileList | File[]) {
+    const accepted = Array.from(files).filter((file) => /\.(mp3|wav)$/i.test(file.name));
+    setUploadItems((current) => [
+      ...current,
+      ...accepted.map((file, index) => ({
+        id: `${file.name}-${file.lastModified}-${file.size}-${current.length + index}`,
+        file,
+        startedAt: localInputTime(file.lastModified || Date.now()),
+        status: "waiting" as const,
+      })),
+    ]);
+    if (accepted.length) setUploadOpen(true);
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    addFiles(event.dataTransfer.files);
+  }
+
+  async function runUploads(ids?: Set<string>) {
+    if (uploading) return;
+    setUploading(true);
+    const queue = uploadItems.filter(
+      (item) =>
+        (ids ? ids.has(item.id) : item.status === "waiting" || item.status === "failed") &&
+        item.status !== "queued",
+    );
+    for (const item of queue) {
+      setUploadItems((current) =>
+        current.map((candidate) =>
+          candidate.id === item.id
+            ? { ...candidate, status: "uploading", error: undefined }
+            : candidate,
+        ),
+      );
+      try {
+        const startedAt = item.startedAt ? new Date(item.startedAt).toISOString() : undefined;
+        const result = await uploadWebRecording(item.file, startedAt);
+        setUploadItems((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id
+              ? {
+                  ...candidate,
+                  status: "queued",
+                  recordingId: result.recording_id,
+                  error: undefined,
+                }
+              : candidate,
+          ),
+        );
+      } catch (caught: unknown) {
+        if (caught instanceof ApiError && caught.status === 401) {
+          invalidate();
+          navigate("/login", { replace: true });
+          break;
+        }
+        setUploadItems((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id
+              ? { ...candidate, status: "failed", error: t("upload.failed") }
+              : candidate,
+          ),
+        );
+      }
+    }
+    setUploading(false);
+    setRefreshKey((current) => current + 1);
+  }
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -83,14 +173,108 @@ export function RecordingsPage() {
           <h1>{t("recordings.title")}</h1>
           <p>{t("recordings.description")}</p>
         </div>
-        <div className="privacy-note">
+        <div className="heading-actions">
+          <button className="button" type="button" onClick={() => setUploadOpen((value) => !value)}>
+            {t("upload.open")}
+          </button>
+          <div className="privacy-note">
           <span className="privacy-icon" aria-hidden="true">⌁</span>
           <span>
             <strong>{t("recordings.privacyTitle")}</strong>
             <small>{t("recordings.privacyDescription")}</small>
           </span>
+          </div>
         </div>
       </header>
+
+      {uploadOpen ? (
+        <section className="panel upload-panel" aria-label={t("upload.title")}>
+          <div className="panel-heading-row">
+            <div>
+              <p className="panel-kicker">MP3 / WAV</p>
+              <h2>{t("upload.title")}</h2>
+            </div>
+            {uploadItems.length ? (
+              <button
+                className="button"
+                disabled={uploading || uploadItems.every((item) => item.status === "queued")}
+                type="button"
+                onClick={() => void runUploads()}
+              >
+                {uploading ? t("upload.uploadingAll") : t("upload.start")}
+              </button>
+            ) : null}
+          </div>
+          <div
+            className="upload-dropzone"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input
+              ref={fileInputRef}
+              accept=".mp3,.wav,audio/mpeg,audio/wav"
+              hidden
+              multiple
+              type="file"
+              onChange={(event) => {
+                if (event.target.files) addFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <strong>{t("upload.drop")}</strong>
+            <span>{t("upload.help")}</span>
+          </div>
+          {uploadItems.length ? (
+            <ol className="upload-list">
+              {uploadItems.map((item) => (
+                <li key={item.id}>
+                  <div>
+                    <strong>{item.file.name}</strong>
+                    <small>{formatBytes(item.file.size)}</small>
+                  </div>
+                  <label>
+                    {t("upload.startedAt")}
+                    <input
+                      disabled={item.status === "uploading" || item.status === "queued"}
+                      type="datetime-local"
+                      value={item.startedAt}
+                      onChange={(event) =>
+                        setUploadItems((current) =>
+                          current.map((candidate) =>
+                            candidate.id === item.id
+                              ? { ...candidate, startedAt: event.target.value }
+                              : candidate,
+                          ),
+                        )
+                      }
+                    />
+                  </label>
+                  <span className={`upload-state upload-state-${item.status}`}>
+                    {t(`upload.status.${item.status}` as Parameters<typeof t>[0])}
+                  </span>
+                  {item.error ? <small className="safe-error-message">{item.error}</small> : null}
+                  {item.status === "failed" ? (
+                    <button
+                      className="button button-secondary"
+                      disabled={uploading}
+                      type="button"
+                      onClick={() => void runUploads(new Set([item.id]))}
+                    >
+                      {t("common.retry")}
+                    </button>
+                  ) : null}
+                  {item.recordingId ? (
+                    <Link className="button button-secondary" to={`/recordings/${item.recordingId}`}>
+                      {t("upload.openResult")}
+                    </Link>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </section>
+      ) : null}
 
       <div className="archive-stats" aria-label={t("recordings.summaryAria")}>
         <div>
