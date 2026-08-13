@@ -174,7 +174,11 @@ export function RecordingsPage() {
           <p>{t("recordings.description")}</p>
         </div>
         <div className="heading-actions">
-          <button className="button" type="button" onClick={() => setUploadOpen((value) => !value)}>
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={() => setUploadOpen((value) => !value)}
+          >
             {t("upload.open")}
           </button>
           <div className="privacy-note">

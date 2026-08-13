@@ -158,7 +158,9 @@ describe("application routes", () => {
     const browser = userEvent.setup();
 
     const { container } = render(<App />);
-    await browser.click(await screen.findByRole("button", { name: "上載音訊" }));
+    const uploadButton = await screen.findByRole("button", { name: "上載音訊" });
+    expect(uploadButton).toHaveClass("button-primary");
+    await browser.click(uploadButton);
     const input = container.querySelector('input[type="file"]') as HTMLInputElement;
     await browser.upload(input, [
       new File(["one"], "first.wav", { type: "audio/wav", lastModified: 1 }),
