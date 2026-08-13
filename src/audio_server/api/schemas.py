@@ -176,6 +176,13 @@ class TranscriptUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_revision: int = Field(ge=0)
+    # Deliberately unbounded in length. An edit must carry the complete current
+    # segment list, and the merge stage emits one segment per speaker run --
+    # which is per word when attribution alternates -- so a long conversational
+    # recording legitimately produces tens of thousands of segments. Any fixed
+    # ceiling would make those transcripts permanently uneditable. Total
+    # validation work is bounded by MAX_MUTATION_REQUEST_BYTES instead, which
+    # caps the body before it is parsed.
     segments: list[TranscriptSegmentUpdate]
 
 

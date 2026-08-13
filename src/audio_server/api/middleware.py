@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 
 from starlette.responses import JSONResponse
@@ -14,12 +15,23 @@ MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class _BodyLimit:
+    """A byte ceiling plus the public error identity used when it is exceeded."""
+
+    max_bytes: int
+    code: str
+    message: str
+
+
 class _RequestBodyTooLarge(Exception):
-    pass
+    def __init__(self, limit: _BodyLimit) -> None:
+        super().__init__(limit.code)
+        self.limit = limit
 
 
 class ApiRequestGuardMiddleware:
-    """Authenticate private APIs and cap uploads before multipart parsing."""
+    """Authenticate private APIs and cap request bodies before they are parsed."""
 
     def __init__(
         self,
@@ -28,13 +40,25 @@ class ApiRequestGuardMiddleware:
         authenticator: TokenAuthenticator,
         web_auth_service: WebAuthService | None = None,
         max_upload_request_bytes: int,
+        max_mutation_request_bytes: int,
     ) -> None:
         if max_upload_request_bytes <= 0:
             raise ValueError("max_upload_request_bytes must be positive")
+        if max_mutation_request_bytes <= 0:
+            raise ValueError("max_mutation_request_bytes must be positive")
         self._app = app
         self._authenticator = authenticator
         self._web_auth_service = web_auth_service
-        self._max_upload_request_bytes = max_upload_request_bytes
+        self._upload_limit = _BodyLimit(
+            max_bytes=max_upload_request_bytes,
+            code="upload_request_too_large",
+            message="Upload request exceeds the configured size limit.",
+        )
+        self._mutation_limit = _BodyLimit(
+            max_bytes=max_mutation_request_bytes,
+            code="request_body_too_large",
+            message="Request body exceeds the configured size limit.",
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not _is_private_api(scope):
@@ -55,9 +79,9 @@ class ApiRequestGuardMiddleware:
 
         try:
             await self._handle_private_request(scope, receive, tracking_send)
-        except _RequestBodyTooLarge:
+        except _RequestBodyTooLarge as exc:
             if not response_started:
-                await self._send_too_large(scope, receive, send)
+                await _send_too_large(scope, receive, send, exc.limit)
         except Exception as exc:
             # This middleware is inside Starlette's traceback-emitting server
             # error layer. Sanitizing here prevents SQL parameters, metadata,
@@ -89,14 +113,14 @@ class ApiRequestGuardMiddleware:
                     message=auth_error.safe_message,
                 )
                 return
-            await self._handle_limited_upload(scope, receive, send)
+            await self._handle_limited_request(scope, receive, send, self._upload_limit)
             return
         if (
             _is_web_auth_path(scope)
             or _is_browser_read(scope)
             or _is_browser_recording_mutation(scope)
         ):
-            await self._app(scope, receive, send)
+            await self._handle_limited_request(scope, receive, send, self._mutation_limit)
             return
 
         if not self._is_bearer_authenticated(scope):
@@ -112,17 +136,17 @@ class ApiRequestGuardMiddleware:
             return
 
         if not _is_recording_upload(scope):
-            await self._app(scope, receive, send)
+            await self._handle_limited_request(scope, receive, send, self._mutation_limit)
             return
 
-        await self._handle_limited_upload(scope, receive, send)
+        await self._handle_limited_request(scope, receive, send, self._upload_limit)
 
-    async def _handle_limited_upload(
-        self, scope: Scope, receive: Receive, send: Send
+    async def _handle_limited_request(
+        self, scope: Scope, receive: Receive, send: Send, limit: _BodyLimit
     ) -> None:
         declared_length = _content_length(scope)
-        if declared_length is not None and declared_length > self._max_upload_request_bytes:
-            await self._send_too_large(scope, receive, send)
+        if declared_length is not None and declared_length > limit.max_bytes:
+            await _send_too_large(scope, receive, send, limit)
             return
 
         received_bytes = 0
@@ -132,8 +156,8 @@ class ApiRequestGuardMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received_bytes += len(message.get("body", b""))
-                if received_bytes > self._max_upload_request_bytes:
-                    raise _RequestBodyTooLarge
+                if received_bytes > limit.max_bytes:
+                    raise _RequestBodyTooLarge(limit)
             return message
 
         await self._app(scope, limited_receive, send)
@@ -190,15 +214,18 @@ class ApiRequestGuardMiddleware:
             return False
         return self._authenticator.authenticate(parts[1]) is not None
 
-    async def _send_too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await _send_error(
-            scope,
-            receive,
-            send,
-            status_code=413,
-            code="upload_request_too_large",
-            message="Upload request exceeds the configured size limit.",
-        )
+
+async def _send_too_large(
+    scope: Scope, receive: Receive, send: Send, limit: _BodyLimit
+) -> None:
+    await _send_error(
+        scope,
+        receive,
+        send,
+        status_code=413,
+        code=limit.code,
+        message=limit.message,
+    )
 
 
 def _is_private_api(scope: Scope) -> bool:

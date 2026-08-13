@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 512 * 1024 * 1024
     max_audio_duration_seconds: float = 6 * 60 * 60
     max_metadata_bytes: int = 16 * 1024
+    # A transcript edit must carry every existing segment, so this ceiling has
+    # to stay above the largest legitimate complete transcript. That payload
+    # grows with MAX_AUDIO_DURATION_SECONDS: at the six-hour default a dense
+    # conversational transcript reaches roughly 8 MiB, so raise this alongside
+    # any increase to the duration ceiling.
+    max_mutation_request_bytes: int = 32 * 1024 * 1024
 
     log_level: str = "INFO"
     log_format: Literal["json", "plain"] = "json"
@@ -136,6 +142,7 @@ class Settings(BaseSettings):
     @field_validator(
         "max_upload_bytes",
         "max_metadata_bytes",
+        "max_mutation_request_bytes",
         "processing_workers",
         "processing_max_attempts",
         "job_heartbeat_seconds",

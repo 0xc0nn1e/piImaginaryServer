@@ -223,6 +223,7 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `MAX_UPLOAD_BYTES` | `536870912` | Exact maximum number of bytes in the `audio` part, 512 MiB by default. |
 | `MAX_METADATA_BYTES` | `16384` | Maximum JSON metadata part, 16 KiB by default. |
 | `MAX_AUDIO_DURATION_SECONDS` | `21600` | Maximum probed audio duration, six hours by default. |
+| `MAX_MUTATION_REQUEST_BYTES` | `33554432` | Request-body cap for every non-upload `/api/v1` request, 32 MiB by default. Raise it alongside `MAX_AUDIO_DURATION_SECONDS`. |
 | `FFMPEG_BINARY` / `FFPROBE_BINARY` | executable names | Explicit binary locations when not on `PATH`. |
 | `FFMPEG_TIMEOUT_SECONDS` | `3600` | Upper bound for preprocessing. |
 | `PROCESSING_WORKERS` | `1` | Number of worker processes; each loads its own model copies. |
@@ -264,7 +265,21 @@ internal `DATABASE_URL` from these values.
 Before multipart parsing, the API enforces a total request-body guard derived
 as `MAX_UPLOAD_BYTES + MAX_METADATA_BYTES + 1 MiB` of multipart overhead. The
 streaming storage limit still independently enforces the exact number of audio
-bytes. A production reverse proxy must also impose a total request-body limit;
+bytes. Every other `/api/v1` request is capped at `MAX_MUTATION_REQUEST_BYTES`
+so transcript and analysis edits cannot be buffered without bound before
+validation.
+
+A transcript edit is deliberately not limited by segment count. The merge stage
+emits one segment per contiguous same-speaker run, which is per word when
+attribution alternates, so a dense multi-hour conversation legitimately reaches
+tens of thousands of segments; and because an edit must submit the complete
+current segment list, any count ceiling would leave those recordings
+permanently uneditable. The byte cap is the only bound, and it must therefore
+stay above the largest complete transcript the duration ceiling allows. At the
+six-hour default that payload is roughly 8 MiB against a 32 MiB cap, so raise
+`MAX_MUTATION_REQUEST_BYTES` whenever `MAX_AUDIO_DURATION_SECONDS` grows.
+
+A production reverse proxy must also impose a total request-body limit;
 set it to the derived application cap or slightly higher so the API, rather
 than an unbounded ingress buffer, remains the final validator.
 

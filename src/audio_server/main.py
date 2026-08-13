@@ -94,6 +94,7 @@ def create_app(
             + active_settings.max_metadata_bytes
             + MULTIPART_OVERHEAD_BYTES
         ),
+        max_mutation_request_bytes=active_settings.max_mutation_request_bytes,
     )
     register_error_handlers(application)
     register_web_auth_error_handler(application)
