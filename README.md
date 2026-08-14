@@ -479,6 +479,9 @@ must inspect and quarantine repeatedly rejected client items.
 | `GET` | `/api/v1/recordings/{id}/analysis` | Completed, skipped, or failed optional analysis. |
 | `POST` | `/api/v1/recordings/{id}/analysis/reprocess` | Queue analysis only; never reads audio or runs Whisper/pyannote. |
 | `PUT` | `/api/v1/recordings/{id}/analysis` | Replace structured analysis using an expected revision. |
+| `GET` | `/api/v1/bookmarks` | Saved expressions/highlights for the signed-in administrator; optional `kind` filter. |
+| `POST` | `/api/v1/bookmarks` | Save an analysis quote as a snapshot; Origin and CSRF required. |
+| `DELETE` | `/api/v1/bookmarks/{id}` | Remove one saved quote; Origin and CSRF required. |
 
 List requests accept `limit` (default 50, maximum 100), `offset`, `device_id`,
 and `status`. Transcript or analysis requests made before the result is ready
@@ -490,19 +493,34 @@ Deletion rejects queued or processing recordings with `409`; success returns
 `204` and permanently removes the original audio, transcript, analyses, jobs,
 and processing activity.
 
+Bookmarks belong to an administrator account rather than to a device, so they
+are the one resource that accepts only browser session authentication; the
+machine Bearer credential is rejected. Saving a quote stores an independent
+snapshot of its Japanese text, Cantonese translation, usage or reason note,
+speaker, and timestamp. Analysis items live inside the analysis JSON and have
+no stable identity — reprocessing regenerates them, transcript edits renumber
+their segments, and deleting a recording removes them — so a snapshot is what
+keeps a personal study list intact. Deleting a recording therefore detaches its
+bookmarks rather than removing them: `recording_id` becomes null,
+`source_deleted_at` is set, and `source_label` preserves the original filename.
+Saving the same quote twice is idempotent, keyed on kind plus exact Japanese
+text within a recording.
+
 Interactive OpenAPI documentation is available at `/docs` in environments
 where it is enabled.
 
 ## Web management UI
 
 The React/TypeScript SPA is served by an unprivileged Nginx container. It has
-four browser routes:
+five browser routes:
 
 - `/setup`: one-time administrator creation
 - `/login`: administrator sign-in
 - `/recordings`: paginated/filterable list and sequential multi-file MP3/WAV upload
 - `/recordings/{id}`: metadata, current stage, safe activity, editable transcript,
   bilingual analysis, separate retranscription/reanalysis, and permanent deletion
+- `/bookmarks`: saved natural expressions and highlights, filterable by kind, each
+  linking back to its recording while that recording still exists
 
 The interface defaults to Japanese and can be switched to Hong Kong
 Traditional Chinese from the login, setup, desktop sidebar, or mobile header.

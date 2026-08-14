@@ -2,6 +2,10 @@ import type {
   ActivityResponse,
   AnalysisResponse,
   AnalysisResultV2,
+  Bookmark,
+  BookmarkCreateRequest,
+  BookmarkKind,
+  BookmarkListResponse,
   ProcessingRequestResponse,
   RecordingListResponse,
   RecordingStatus,
@@ -118,6 +122,29 @@ export function readCsrfCookie(): string | null {
   } catch {
     return null;
   }
+}
+
+export function listBookmarks(kind?: BookmarkKind): Promise<BookmarkListResponse> {
+  const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  return request(`/api/v1/bookmarks${query}`);
+}
+
+export function createBookmark(
+  payload: BookmarkCreateRequest,
+  csrfToken: string,
+): Promise<Bookmark> {
+  return request("/api/v1/bookmarks", {
+    method: "POST",
+    body: payload,
+    csrfToken,
+  });
+}
+
+export async function deleteBookmark(bookmarkId: string, csrfToken: string) {
+  await request<unknown>(`/api/v1/bookmarks/${encodeURIComponent(bookmarkId)}`, {
+    method: "DELETE",
+    csrfToken,
+  });
 }
 
 export function listRecordings(params: {

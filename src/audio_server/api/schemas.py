@@ -8,7 +8,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from audio_server.db.models import AnalysisStatus, JobKind, JobStage, JobStatus, RecordingStatus
+from audio_server.db.models import (
+    AnalysisStatus,
+    BookmarkKind,
+    JobKind,
+    JobStage,
+    JobStatus,
+    RecordingStatus,
+)
 
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -259,6 +266,62 @@ class RetryResponse(BaseModel):
     recording_id: uuid.UUID
     job_id: uuid.UUID
     status: JobStatus
+
+
+class BookmarkCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: BookmarkKind
+    recording_id: uuid.UUID | None = None
+    original_ja: str = Field(min_length=1, max_length=1000)
+    translation_zh_hk: str = Field(min_length=1, max_length=1000)
+    note_ja: str = Field(min_length=1, max_length=2000)
+    note_zh_hk: str = Field(min_length=1, max_length=2000)
+    speaker_label: str = Field(min_length=1, max_length=64)
+    start_time: float = Field(ge=0)
+    end_time: float | None = Field(default=None, gt=0)
+
+    @field_validator("original_ja", "translation_zh_hk", "note_ja", "note_zh_hk")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("value cannot be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_times(self) -> BookmarkCreateRequest:
+        if not isfinite(self.start_time):
+            raise ValueError("start_time must be finite")
+        if self.end_time is not None:
+            if not isfinite(self.end_time):
+                raise ValueError("end_time must be finite")
+            if self.end_time <= self.start_time:
+                raise ValueError("end_time must be after start_time")
+        return self
+
+
+class BookmarkResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kind: BookmarkKind
+    source_digest: str
+    original_ja: str
+    translation_zh_hk: str
+    note_ja: str
+    note_zh_hk: str
+    speaker_label: str
+    start_time: float
+    end_time: float | None
+    recording_id: uuid.UUID | None
+    source_label: str
+    source_deleted_at: datetime | None
+    created_at: datetime
+
+
+class BookmarkListResponse(BaseModel):
+    items: list[BookmarkResponse]
 
 
 class ErrorDetail(BaseModel):

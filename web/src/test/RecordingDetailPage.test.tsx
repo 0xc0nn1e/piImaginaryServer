@@ -117,6 +117,28 @@ function mockDetailApi(transcriptResponse: Response) {
         }),
       );
     }
+    if (path.startsWith("/api/v1/bookmarks/") && init?.method === "DELETE") {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (path === "/api/v1/bookmarks" && init?.method === "POST") {
+      const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return Promise.resolve(
+        jsonResponse(
+          {
+            id: "bookmark-new",
+            source_digest: "c".repeat(64),
+            source_label: "meeting.flac",
+            source_deleted_at: null,
+            created_at: "2026-08-14T00:00:00Z",
+            ...payload,
+          },
+          201,
+        ),
+      );
+    }
+    if (path.startsWith("/api/v1/bookmarks")) {
+      return Promise.resolve(jsonResponse({ items: [] }));
+    }
     if (path.endsWith("/transcript")) return Promise.resolve(transcriptResponse);
     if (path.endsWith("/analysis")) return Promise.resolve(jsonResponse(completedAnalysis));
     if (path.endsWith("/reprocess")) {
@@ -232,6 +254,42 @@ describe("recording transcript states", () => {
     await waitFor(() => expect(play).toHaveBeenCalledOnce());
     expect((audio as HTMLAudioElement).currentTime).toBe(5);
     expect(screen.getByRole("button", { name: /停止.*一旦こちら/ })).toBeInTheDocument();
+  });
+
+  it("saves an analysis expression as a bookmark and reflects the saved state", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    const fetchMock = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+    await screen.findByRole("heading", { name: "內容摘要" });
+
+    await browser.click(screen.getByRole("button", { name: "收藏" }));
+
+    expect(await screen.findByRole("button", { name: "已收藏" })).toBeInTheDocument();
+    const saved = fetchMock.mock.calls.find(
+      ([input, init]) => String(input) === "/api/v1/bookmarks" && init?.method === "POST",
+    );
+    expect(saved).toBeDefined();
+    const body = JSON.parse(String((saved as [unknown, RequestInit])[1].body));
+    expect(body).toMatchObject({
+      kind: "expression",
+      recording_id: recordingId,
+      original_ja: "一旦こちらで持ち帰ります。",
+      // The card's usage text is stored as the bookmark note.
+      note_ja: "職場で保留するときの表現です。",
+      note_zh_hk: "職場表示要內部研究時使用。",
+      speaker_label: "SPEAKER_00",
+      start_time: 5,
+      end_time: 7,
+    });
+    expect((saved as [unknown, RequestInit])[1].headers).toBeDefined();
   });
 
   it("queues reprocessing with the CSRF cookie", async () => {

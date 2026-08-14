@@ -68,6 +68,11 @@ class AnalysisStatus(enum.StrEnum):
     STALE = "stale"
 
 
+class BookmarkKind(enum.StrEnum):
+    EXPRESSION = "expression"
+    HIGHLIGHT = "highlight"
+
+
 def enum_column(enum_type: type[enum.Enum], *, name: str) -> Enum:
     return Enum(
         enum_type,
@@ -288,3 +293,52 @@ class Analysis(Base):
 
     recording: Mapped[Recording] = relationship(back_populates="analyses")
     job: Mapped[ProcessingJob] = relationship(back_populates="analyses")
+
+
+class Bookmark(Base):
+    """A saved analysis quote, stored as an independent snapshot.
+
+    Analysis items live inside ``Analysis.result`` and have no stable identity:
+    reprocessing regenerates them, transcript edits renumber their segments, and
+    deleting a recording removes them. A bookmark therefore keeps its own copy
+    of the text so a personal study list survives all of those, and links back
+    to its recording only as a soft reference.
+    """
+
+    __tablename__ = "bookmarks"
+    __table_args__ = (
+        CheckConstraint("kind IN ('expression', 'highlight')", name="bookmark_kind"),
+        UniqueConstraint("user_id", "source_digest", name="uq_bookmarks_user_source"),
+        Index("ix_bookmarks_user_created", "user_id", "created_at"),
+        Index("ix_bookmarks_recording", "recording_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[BookmarkKind] = mapped_column(
+        enum_column(BookmarkKind, name="bookmark_kind"), nullable=False
+    )
+    # Stable identity of the saved quote, so re-saving the same item is a no-op
+    # and the source card can show whether it is already bookmarked. It is
+    # computed once and never recomputed, because the recording may later go.
+    source_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_ja: Mapped[str] = mapped_column(Text, nullable=False)
+    translation_zh_hk: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``usage`` for an expression, ``reason`` for a highlight.
+    note_ja: Mapped[str] = mapped_column(Text, nullable=False)
+    note_zh_hk: Mapped[str] = mapped_column(Text, nullable=False)
+    speaker_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    start_time: Mapped[float] = mapped_column(Float, nullable=False)
+    end_time: Mapped[float | None] = mapped_column(Float)
+    recording_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recordings.id", ondelete="SET NULL")
+    )
+    # Kept so the list still shows where a quote came from after its recording
+    # has been deleted.
+    source_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

@@ -97,6 +97,16 @@ export function AppLayout() {
               <small>{t("nav.recordingsSub")}</small>
             </span>
           </NavLink>
+          <NavLink to="/bookmarks">
+            <span className="nav-glyph" aria-hidden="true">
+              <i />
+              <i />
+            </span>
+            <span>
+              {t("nav.bookmarks")}
+              <small>{t("nav.bookmarksSub")}</small>
+            </span>
+          </NavLink>
         </nav>
         <LanguageSwitch />
         {SHOW_HEALTH ? (

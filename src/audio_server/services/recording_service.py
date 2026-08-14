@@ -41,6 +41,7 @@ from audio_server.processing.errors import (
     ProviderConfigurationError,
     RetryableProcessingError,
 )
+from audio_server.services.bookmark_service import detach_recording_bookmarks
 from audio_server.services.storage import (
     StagedDeletion,
     StagedUpload,
@@ -592,6 +593,9 @@ class RecordingService:
                     )
                 )
                 deletion = self._storage.stage_delete(recording.storage_key)
+                # Saved quotes outlive their source audio, so detach them
+                # before the recording row goes.
+                detach_recording_bookmarks(session, recording_id=recording_id)
                 session.execute(
                     sql_delete(ProcessingActivity).where(
                         ProcessingActivity.recording_id == recording_id

@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from audio_server.api.dependencies import AuthenticationError
+from audio_server.services.bookmark_service import BookmarkServiceError
 from audio_server.services.recording_service import RecordingServiceError
 
 
@@ -31,6 +32,12 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RecordingServiceError)
     async def recording_error_handler(
         _request: Request, exc: RecordingServiceError
+    ) -> JSONResponse:
+        return _error_response(exc.status_code, exc.code, exc.safe_message)
+
+    @app.exception_handler(BookmarkServiceError)
+    async def bookmark_error_handler(
+        _request: Request, exc: BookmarkServiceError
     ) -> JSONResponse:
         return _error_response(exc.status_code, exc.code, exc.safe_message)
 

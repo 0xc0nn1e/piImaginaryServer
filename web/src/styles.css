@@ -2269,3 +2269,86 @@ select {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* Saved analysis quotes: the toggle on a card, and the bookmarks page. */
+.bookmark-button.is-saved {
+  color: var(--mint);
+  font-weight: 560;
+}
+
+.bookmark-button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.page-subtitle {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.count-pill {
+  padding: 5px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted-strong);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin: 20px 0 16px;
+  flex-wrap: wrap;
+}
+
+.filter-chip {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.filter-chip:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.filter-chip.is-active {
+  border-color: var(--violet-strong);
+  background: var(--violet-soft);
+  color: var(--ink);
+}
+
+.empty-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.bookmark-source {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.72rem;
+  flex-wrap: wrap;
+}
+
+.bookmark-source .source-label {
+  overflow: hidden;
+  max-width: 220px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmark-source .source-gone {
+  color: var(--amber);
+}

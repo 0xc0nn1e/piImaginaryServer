@@ -117,6 +117,7 @@ class ApiRequestGuardMiddleware:
             return
         if (
             _is_web_auth_path(scope)
+            or _is_bookmark_path(scope)
             or _is_browser_read(scope)
             or _is_browser_recording_mutation(scope)
         ):
@@ -248,6 +249,17 @@ def _is_web_auth_path(scope: Scope) -> bool:
         "/api/v1/auth/me",
         "/api/v1/auth/logout",
     }
+
+
+def _is_bookmark_path(scope: Scope) -> bool:
+    """Bookmarks authenticate per user, so the router owns their auth entirely.
+
+    The Bearer credential identifies a device rather than an account and is
+    never accepted here, so this guard must not demand one.
+    """
+
+    path = str(scope.get("path", "")).rstrip("/")
+    return path == "/api/v1/bookmarks" or path.startswith("/api/v1/bookmarks/")
 
 
 def _is_browser_read(scope: Scope) -> bool:

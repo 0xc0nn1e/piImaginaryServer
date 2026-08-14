@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from audio_server.api.activity import router as activity_router
+from audio_server.api.bookmarks import router as bookmarks_router
 from audio_server.api.errors import register_error_handlers
 from audio_server.api.health import router as health_router
 from audio_server.api.middleware import MULTIPART_OVERHEAD_BYTES, ApiRequestGuardMiddleware
@@ -17,6 +18,7 @@ from audio_server.core.logging import configure_logging
 from audio_server.core.security import TokenAuthenticator
 from audio_server.processing.audio import AudioProcessor, FFmpegSettings
 from audio_server.processing.contracts import AudioPreprocessor
+from audio_server.services.bookmark_service import BookmarkService
 from audio_server.services.recording_service import RecordingService
 from audio_server.services.storage import LocalStorageBackend, StorageBackend
 from audio_server.web_auth import (
@@ -84,6 +86,9 @@ def create_app(
         transcript_retention_days=active_settings.transcript_retention_days,
     )
     application.state.recording_service = recording_service
+    application.state.bookmark_service = BookmarkService(
+        session_factory=active_database.session_factory
+    )
 
     application.add_middleware(
         ApiRequestGuardMiddleware,
@@ -103,6 +108,7 @@ def create_app(
     application.include_router(recordings_router)
     application.include_router(web_recordings_router)
     application.include_router(activity_router)
+    application.include_router(bookmarks_router)
     return application
 
 

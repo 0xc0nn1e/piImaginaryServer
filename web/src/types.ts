@@ -160,6 +160,43 @@ export interface AnalysisHighlight {
   reason_zh_hk: string;
 }
 
+export type BookmarkKind = "expression" | "highlight";
+
+export interface Bookmark {
+  id: string;
+  kind: BookmarkKind;
+  source_digest: string;
+  original_ja: string;
+  translation_zh_hk: string;
+  /** usage for an expression, reason for a highlight */
+  note_ja: string;
+  note_zh_hk: string;
+  speaker_label: string;
+  start_time: number;
+  end_time: number | null;
+  /** null once the source recording has been deleted */
+  recording_id: string | null;
+  source_label: string;
+  source_deleted_at: string | null;
+  created_at: string;
+}
+
+export interface BookmarkListResponse {
+  items: Bookmark[];
+}
+
+export interface BookmarkCreateRequest {
+  kind: BookmarkKind;
+  recording_id: string | null;
+  original_ja: string;
+  translation_zh_hk: string;
+  note_ja: string;
+  note_zh_hk: string;
+  speaker_label: string;
+  start_time: number;
+  end_time: number | null;
+}
+
 export interface AnalysisResultV2 {
   description: BilingualText;
   summary: BilingualText | null;

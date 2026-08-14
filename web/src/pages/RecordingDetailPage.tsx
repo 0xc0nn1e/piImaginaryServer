@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 
 import {
   ApiError,
+  createBookmark,
+  deleteBookmark,
   deleteRecording,
   getActivity,
   getAnalysis,
@@ -11,6 +13,8 @@ import {
   getRecordingAudioUrl,
   getRecordingStatus,
   getTranscript,
+  listBookmarks,
+  readCsrfCookie,
   reprocessRecording,
   updateAnalysis,
   updateTranscript,
@@ -24,6 +28,8 @@ import type {
   ActivityResponse,
   AnalysisResponse,
   AnalysisResultV2,
+  Bookmark,
+  BookmarkKind,
   RecordingStatusResponse,
   RecordingSummary,
   TranscriptResponse,
@@ -42,6 +48,11 @@ type Mutation = "reprocess" | "reanalyse" | "delete" | "transcript" | "analysis"
 
 const terminalStatuses = new Set(["completed", "failed"]);
 const failureEvents = new Set(["processing_failed"]);
+
+/** Matches the server's saved-quote identity: kind plus exact Japanese text. */
+function bookmarkKey(kind: BookmarkKind, originalJa: string): string {
+  return `${kind}|${originalJa.trim()}`;
+}
 
 function cloneResult(result: AnalysisResultV2): AnalysisResultV2 {
   const clone = JSON.parse(JSON.stringify(result)) as AnalysisResultV2;
@@ -70,6 +81,16 @@ export function RecordingDetailPage() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const clipEndRef = useRef<number | null>(null);
   const [playingClip, setPlayingClip] = useState<string | null>(null);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarkPending, setBookmarkPending] = useState<string | null>(null);
+
+  const savedBookmarks = useMemo(() => {
+    const byKey = new Map<string, Bookmark>();
+    for (const item of bookmarks) {
+      if (item.recording_id === id) byKey.set(bookmarkKey(item.kind, item.original_ja), item);
+    }
+    return byKey;
+  }, [bookmarks, id]);
 
   const stopPlayback = useCallback(() => {
     audioRef.current?.pause();
@@ -110,6 +131,64 @@ export function RecordingDetailPage() {
   );
 
   useEffect(() => () => stopPlayback(), [stopPlayback]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await listBookmarks();
+        if (!controller.signal.aborted) setBookmarks(response.items);
+      } catch {
+        // Saved quotes are supplementary; a failure here must not block the
+        // recording view. The toggle simply shows the unsaved state.
+      }
+    })();
+    return () => controller.abort();
+  }, []);
+
+  const toggleBookmark = useCallback(
+    async (
+      kind: BookmarkKind,
+      item: {
+        original_ja: string;
+        translation_zh_hk: string;
+        note_ja: string;
+        note_zh_hk: string;
+        speaker_label: string;
+        start_time: number;
+        end_time: number | null;
+      },
+    ) => {
+      const key = bookmarkKey(kind, item.original_ja);
+      const csrfToken = readCsrfCookie();
+      if (!csrfToken) {
+        invalidate();
+        return;
+      }
+      setBookmarkPending(key);
+      const existing = savedBookmarks.get(key);
+      try {
+        if (existing) {
+          await deleteBookmark(existing.id, csrfToken);
+          setBookmarks((current) => current.filter((entry) => entry.id !== existing.id));
+        } else {
+          const created = await createBookmark({ kind, recording_id: id, ...item }, csrfToken);
+          setBookmarks((current) => [created, ...current]);
+        }
+        setMutationMessage(null);
+      } catch (caught) {
+        if (caught instanceof ApiError && caught.status === 401) {
+          invalidate();
+          navigate("/login", { replace: true });
+          return;
+        }
+        setMutationMessage(t("analysis.bookmarkError"));
+      } finally {
+        setBookmarkPending(null);
+      }
+    },
+    [id, invalidate, navigate, savedBookmarks, t],
+  );
 
   const handleRequestError = useCallback(
     (caught: unknown) => {
@@ -541,14 +620,14 @@ export function RecordingDetailPage() {
           {analysis.kind === "ready" && analysis.data.status === "failed" ? <div className="notice notice-error" role="status">{analysis.data.error?.message ?? t("analysis.failed")}</div> : null}
           {analysis.kind === "ready" && analysis.data.job?.kind === "analysis" && analysis.data.job.status === "failed" ? <div className="notice notice-error" role="status">{analysis.data.job.error?.message ?? t("analysis.failedPreserved")}</div> : null}
           {analysis.kind === "ready" && analysis.data.job?.kind === "analysis" && ["queued", "processing"].includes(analysis.data.job.status) ? <div className="notice notice-action" role="status">{t("analysis.refreshing")}</div> : null}
-          {shownAnalysis ? <AnalysisContent result={shownAnalysis} editing={analysisDraft !== null} copied={copied} playingClip={playingClip} setResult={setAnalysisDraft} copyText={copyText} playClip={playClip} /> : null}
+          {shownAnalysis ? <AnalysisContent result={shownAnalysis} editing={analysisDraft !== null} copied={copied} playingClip={playingClip} setResult={setAnalysisDraft} copyText={copyText} playClip={playClip} savedBookmarks={savedBookmarks} bookmarkPending={bookmarkPending} toggleBookmark={toggleBookmark} /> : null}
         </section>
       ) : null}
     </section>
   );
 }
 
-function AnalysisContent({ result, editing, copied, playingClip, setResult, copyText, playClip }: { result: AnalysisResultV2; editing: boolean; copied: string | null; playingClip: string | null; setResult: (value: AnalysisResultV2 | null) => void; copyText: (key: string, text: string) => Promise<void>; playClip: (key: string, startTime: number, endTime: number | null) => Promise<void> }) {
+function AnalysisContent({ result, editing, copied, playingClip, setResult, copyText, playClip, savedBookmarks, bookmarkPending, toggleBookmark }: { result: AnalysisResultV2; editing: boolean; copied: string | null; playingClip: string | null; setResult: (value: AnalysisResultV2 | null) => void; copyText: (key: string, text: string) => Promise<void>; playClip: (key: string, startTime: number, endTime: number | null) => Promise<void>; savedBookmarks: Map<string, Bookmark>; bookmarkPending: string | null; toggleBookmark: (kind: BookmarkKind, item: { original_ja: string; translation_zh_hk: string; note_ja: string; note_zh_hk: string; speaker_label: string; start_time: number; end_time: number | null }) => Promise<void> }) {
   const { t } = useI18n();
   const update = (mutate: (draft: AnalysisResultV2) => void) => {
     const next = cloneResult(result);
@@ -571,8 +650,8 @@ function AnalysisContent({ result, editing, copied, playingClip, setResult, copy
       </div> : null}
       <div className="tag-list">{result.tags.map((tag, index) => editing ? <span className="tag-edit" key={index}><input aria-label={`${t("analysis.tag")} ${index + 1} 日本語`} value={tag.ja} onChange={(event) => update((next) => { next.tags[index].ja = event.target.value; })} /><input aria-label={`${t("analysis.tag")} ${index + 1} 廣東話`} value={tag.zh_hk} onChange={(event) => update((next) => { next.tags[index].zh_hk = event.target.value; })} /></span> : <span className="tag-chip" key={`${tag.ja}-${tag.zh_hk}`}>{tag.ja}<small>{tag.zh_hk}</small></span>)}</div>
     </section>
-    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Natural expressions</p><h3>{t("analysis.expressions")}</h3></div><span>{result.natural_expressions.length}</span></div><div className="analysis-card-grid">{result.natural_expressions.map((item, index) => { const clipKey = `expression-${index}`; return <article className="panel analysis-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.usage_ja}\n${item.usage_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.natural_expressions[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].translation_zh_hk = event.target.value; })} /><textarea value={item.usage_ja} onChange={(event) => update((next) => { next.natural_expressions[index].usage_ja = event.target.value; })} /><textarea value={item.usage_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].usage_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.usage_ja}</span><span>{item.usage_zh_hk}</span></div></>}</article>; })}</div></section>
-    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Highlights</p><h3>{t("analysis.highlights")}</h3></div><span>{result.highlights.length}</span></div><div className="analysis-card-grid">{result.highlights.map((item, index) => { const clipKey = `highlight-${index}`; return <article className="panel analysis-card highlight-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.highlights[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.highlights[index].translation_zh_hk = event.target.value; })} /><textarea value={item.reason_ja} onChange={(event) => update((next) => { next.highlights[index].reason_ja = event.target.value; })} /><textarea value={item.reason_zh_hk} onChange={(event) => update((next) => { next.highlights[index].reason_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.reason_ja}</span><span>{item.reason_zh_hk}</span></div></>}</article>; })}</div></section>
+    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Natural expressions</p><h3>{t("analysis.expressions")}</h3></div><span>{result.natural_expressions.length}</span></div><div className="analysis-card-grid">{result.natural_expressions.map((item, index) => { const clipKey = `expression-${index}`; const savedKey = bookmarkKey("expression", item.original_ja); const isSaved = savedBookmarks.has(savedKey); return <article className="panel analysis-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.usage_ja}\n${item.usage_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button><button aria-pressed={isSaved} className={`text-button bookmark-button ${isSaved ? "is-saved" : ""}`} disabled={bookmarkPending === savedKey} type="button" onClick={() => void toggleBookmark("expression", { original_ja: item.original_ja, translation_zh_hk: item.translation_zh_hk, note_ja: item.usage_ja, note_zh_hk: item.usage_zh_hk, speaker_label: item.speaker_label, start_time: item.start_time, end_time: item.end_time })}>{isSaved ? t("analysis.bookmarked") : t("analysis.bookmark")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.natural_expressions[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].translation_zh_hk = event.target.value; })} /><textarea value={item.usage_ja} onChange={(event) => update((next) => { next.natural_expressions[index].usage_ja = event.target.value; })} /><textarea value={item.usage_zh_hk} onChange={(event) => update((next) => { next.natural_expressions[index].usage_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.usage_ja}</span><span>{item.usage_zh_hk}</span></div></>}</article>; })}</div></section>
+    <section className="analysis-section"><div className="section-heading"><div><p className="panel-kicker">Highlights</p><h3>{t("analysis.highlights")}</h3></div><span>{result.highlights.length}</span></div><div className="analysis-card-grid">{result.highlights.map((item, index) => { const clipKey = `highlight-${index}`; const savedKey = bookmarkKey("highlight", item.original_ja); const isSaved = savedBookmarks.has(savedKey); return <article className="panel analysis-card highlight-card" key={`${item.segment_sequence}-${index}`}><div className="analysis-card-meta"><span>{formatTimestamp(item.start_time)}</span><strong>{item.speaker_label}</strong><div className="analysis-card-actions"><button aria-label={`${playingClip === clipKey ? t("analysis.stop") : t("analysis.play")} ${item.original_ja}`} className={`clip-button ${playingClip === clipKey ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, item.start_time, item.end_time)}><span aria-hidden="true">{playingClip === clipKey ? "■" : "▶"}</span>{playingClip === clipKey ? t("analysis.stop") : t("analysis.play")}</button><button className="text-button" type="button" onClick={() => void copyText(clipKey, `${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`)}>{copied === clipKey ? t("detail.copied") : t("analysis.copy")}</button><button aria-pressed={isSaved} className={`text-button bookmark-button ${isSaved ? "is-saved" : ""}`} disabled={bookmarkPending === savedKey} type="button" onClick={() => void toggleBookmark("highlight", { original_ja: item.original_ja, translation_zh_hk: item.translation_zh_hk, note_ja: item.reason_ja, note_zh_hk: item.reason_zh_hk, speaker_label: item.speaker_label, start_time: item.start_time, end_time: item.end_time })}>{isSaved ? t("analysis.bookmarked") : t("analysis.bookmark")}</button></div></div>{editing ? <><textarea value={item.original_ja} onChange={(event) => update((next) => { next.highlights[index].original_ja = event.target.value; })} /><textarea value={item.translation_zh_hk} onChange={(event) => update((next) => { next.highlights[index].translation_zh_hk = event.target.value; })} /><textarea value={item.reason_ja} onChange={(event) => update((next) => { next.highlights[index].reason_ja = event.target.value; })} /><textarea value={item.reason_zh_hk} onChange={(event) => update((next) => { next.highlights[index].reason_zh_hk = event.target.value; })} /></> : <><blockquote>{item.original_ja}</blockquote><p>{item.translation_zh_hk}</p><div className="bilingual-note"><span>{item.reason_ja}</span><span>{item.reason_zh_hk}</span></div></>}</article>; })}</div></section>
   </>;
 }
 
