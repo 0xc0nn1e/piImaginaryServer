@@ -2378,3 +2378,40 @@ blockquote:has(ruby),
 .bilingual-note span:has(ruby) {
   line-height: 2.1;
 }
+
+/* The analysis view is the study surface: Japanese quotes carrying furigana
+   above them, plus their notes and summary. It therefore sets a larger scale
+   than the shared card styles. Scoped to the analysis tab on purpose — the
+   bookmarks page reuses the same card classes and keeps its own scale. */
+.analysis-stack .analysis-card blockquote {
+  font-size: 1.15rem;
+}
+
+.analysis-stack .analysis-card > p {
+  font-size: 1.05rem;
+}
+
+.analysis-stack .bilingual-note {
+  font-size: 0.88rem;
+}
+
+.analysis-stack .analysis-card-meta {
+  font-size: 0.72rem;
+}
+
+.analysis-stack .tag-chip {
+  font-size: 0.86rem;
+}
+
+.analysis-stack .analysis-subheading h4 {
+  font-size: 0.98rem;
+}
+
+.analysis-stack .bilingual-grid span {
+  font-size: 0.68rem;
+}
+
+.analysis-stack .bilingual-grid p {
+  font-size: 1.05rem;
+  line-height: 1.75;
+}
