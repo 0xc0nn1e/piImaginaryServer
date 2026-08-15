@@ -18,6 +18,7 @@ from audio_server.api.schemas import (
     AnalysisResultV2,
     AnalysisUpdateRequest,
     ClientRecordingMetadata,
+    FuriganaToken,
     JobError,
     JobStatusResponse,
     RecordingListResponse,
@@ -29,6 +30,7 @@ from audio_server.api.schemas import (
     TranscriptUpdateRequest,
     UploadRecordingResponse,
 )
+from audio_server.core.furigana import annotate_all
 from audio_server.db.models import ProcessingJob, RecordingStatus
 from audio_server.services.recording_service import RecordingService, RecordingServiceError
 
@@ -173,6 +175,7 @@ def get_transcript(
         revision=recording.transcript_revision,
         text=_format_transcript(segment_responses),
         segments=segment_responses,
+        furigana=_segment_furigana(segment_responses),
     )
 
 
@@ -182,6 +185,7 @@ def get_analysis(
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> AnalysisResponse:
     recording, analysis, analysis_job = service.get_analysis_state(recording_id)
+    structured = _structured_analysis(analysis.result)
     error = None
     if analysis.error_code and analysis.error_message:
         error = {"code": analysis.error_code, "message": analysis.error_message}
@@ -192,9 +196,10 @@ def get_analysis(
         model=analysis.model,
         schema_version=analysis.schema_version,
         revision=recording.analysis_revision,
-        result=_structured_analysis(analysis.result),
+        result=structured,
         job=_job_response(analysis_job) if analysis_job is not None else None,
         error=error,
+        furigana=_analysis_furigana(structured),
     )
 
 
@@ -240,6 +245,7 @@ def update_transcript(
         revision=recording.transcript_revision,
         text=_format_transcript(responses),
         segments=responses,
+        furigana=_segment_furigana(responses),
     )
 
 
@@ -255,6 +261,7 @@ def update_analysis(
         expected_revision=payload.expected_revision,
         result=payload.result,
     )
+    updated = _structured_analysis(analysis.result)
     return AnalysisResponse(
         recording_id=recording_id,
         status=analysis.status,
@@ -262,7 +269,8 @@ def update_analysis(
         model=analysis.model,
         schema_version=analysis.schema_version,
         revision=recording.analysis_revision,
-        result=_structured_analysis(analysis.result),
+        result=updated,
+        furigana=_analysis_furigana(updated),
     )
 
 
@@ -333,6 +341,34 @@ def _job_response(job: ProcessingJob, *, error: JobError | None = None) -> JobSt
         finished_at=job.finished_at,
         error=error,
     )
+
+
+def _segment_furigana(
+    segments: list[TranscriptSegmentResponse],
+) -> dict[str, list[FuriganaToken]]:
+    return {
+        text: [FuriganaToken.model_validate(token) for token in tokens]
+        for text, tokens in annotate_all([segment.text for segment in segments]).items()
+    }
+
+
+def _analysis_furigana(result: AnalysisResultV2 | None) -> dict[str, list[FuriganaToken]]:
+    """Collect every Japanese string the analysis view renders."""
+
+    if result is None:
+        return {}
+    texts: list[str] = [result.description.ja]
+    if result.summary is not None:
+        texts.append(result.summary.ja)
+    texts.extend(tag.ja for tag in result.tags)
+    for expression in result.natural_expressions:
+        texts.extend((expression.original_ja, expression.usage_ja))
+    for highlight in result.highlights:
+        texts.extend((highlight.original_ja, highlight.reason_ja))
+    return {
+        text: [FuriganaToken.model_validate(token) for token in tokens]
+        for text, tokens in annotate_all(texts).items()
+    }
 
 
 def _structured_analysis(result: dict[str, object] | None) -> AnalysisResultV2 | None:

@@ -21,6 +21,21 @@ _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+class FuriganaToken(BaseModel):
+    """One run of Japanese text; ``reading`` is set only over kanji."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    text: str
+    reading: str | None
+
+
+# Responses carry one reading map keyed by the Japanese string rather than a
+# parallel field beside every translated value, so repeated quotes cost nothing
+# and the existing response shapes stay unchanged.
+FuriganaMap = dict[str, list[FuriganaToken]]
+
+
 class ClientRecordingMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -151,6 +166,7 @@ class TranscriptResponse(BaseModel):
     revision: int
     text: str
     segments: list[TranscriptSegmentResponse]
+    furigana: FuriganaMap = Field(default_factory=dict)
 
 
 class TranscriptSegmentUpdate(BaseModel):
@@ -260,6 +276,7 @@ class AnalysisResponse(BaseModel):
     result: AnalysisResultV2 | None
     job: JobStatusResponse | None = None
     error: dict[str, str] | None = None
+    furigana: FuriganaMap = Field(default_factory=dict)
 
 
 class RetryResponse(BaseModel):
@@ -322,6 +339,7 @@ class BookmarkResponse(BaseModel):
 
 class BookmarkListResponse(BaseModel):
     items: list[BookmarkResponse]
+    furigana: FuriganaMap = Field(default_factory=dict)
 
 
 class ErrorDetail(BaseModel):

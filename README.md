@@ -506,6 +506,27 @@ bookmarks rather than removing them: `recording_id` becomes null,
 Saving the same quote twice is idempotent, keyed on kind plus exact Japanese
 text within a recording.
 
+### Japanese reading aids
+
+Transcript, analysis, and bookmark responses carry a `furigana` map alongside
+their existing fields: a dictionary keyed by the exact Japanese string, whose
+value is the list of runs that make it up, each with a hiragana `reading` when
+it covers kanji. The UI sets those readings as `<ruby>` over the kanji. Runs
+always reconstruct the original string exactly, and the reading stops at the
+okurigana, so `持ち帰り` is read `もちかえ` over `持ち帰` with `り` left plain.
+
+Readings come from a dictionary-based morphological analyser (`janome`), not
+from the language model: an LLM invents plausible-looking readings, and a wrong
+reading teaches the wrong word. They are computed when a response is built
+rather than stored, so existing recordings and saved quotes gain readings with
+no reprocessing and no migration. The analyser is pure Python with no model
+download and no credentials, so it does not bring AI runtime into the API.
+
+Its dictionary costs roughly 100 MB of resident memory and 120 ms once it is
+first built. Loading is deferred until the first Japanese string is annotated,
+so an API process that never serves one never pays it; after that each string
+costs about 0.05 ms and repeats are memoised.
+
 Interactive OpenAPI documentation is available at `/docs` in environments
 where it is enabled.
 

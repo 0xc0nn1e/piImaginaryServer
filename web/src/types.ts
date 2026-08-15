@@ -127,6 +127,7 @@ export interface TranscriptResponse {
   revision: number;
   text: string;
   segments: TranscriptSegment[];
+  furigana: FuriganaMap;
 }
 
 export type AnalysisStatus = "completed" | "skipped" | "failed" | "stale";
@@ -160,6 +161,15 @@ export interface AnalysisHighlight {
   reason_zh_hk: string;
 }
 
+export interface FuriganaToken {
+  text: string;
+  /** hiragana over this run; null when the run needs no reading */
+  reading: string | null;
+}
+
+/** Reading runs keyed by the exact Japanese string they annotate. */
+export type FuriganaMap = Record<string, FuriganaToken[]>;
+
 export type BookmarkKind = "expression" | "highlight";
 
 export interface Bookmark {
@@ -183,6 +193,7 @@ export interface Bookmark {
 
 export interface BookmarkListResponse {
   items: Bookmark[];
+  furigana: FuriganaMap;
 }
 
 export interface BookmarkCreateRequest {
@@ -215,6 +226,7 @@ export interface AnalysisResponse {
   result: AnalysisResultV2 | null;
   job: JobStatusDetails | null;
   error: { code: string; message: string } | null;
+  furigana: FuriganaMap;
 }
 
 export interface UploadRecordingResponse {

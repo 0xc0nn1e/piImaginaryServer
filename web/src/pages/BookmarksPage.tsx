@@ -3,10 +3,11 @@ import { Link } from "react-router-dom";
 
 import { ApiError, deleteBookmark, listBookmarks, readCsrfCookie } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { Furigana } from "../components/Furigana";
 import { LoadingView } from "../components/LoadingView";
 import { formatDateTime, formatTimestamp } from "../format";
 import { useI18n } from "../i18n";
-import type { Bookmark, BookmarkKind } from "../types";
+import type { Bookmark, BookmarkKind, FuriganaMap } from "../types";
 
 type Filter = "all" | BookmarkKind;
 
@@ -20,6 +21,7 @@ export function BookmarksPage() {
   const { locale, t } = useI18n();
   const { invalidate } = useAuth();
   const [items, setItems] = useState<Bookmark[] | null>(null);
+  const [readings, setReadings] = useState<FuriganaMap>({});
   const [filter, setFilter] = useState<Filter>("all");
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -30,6 +32,7 @@ export function BookmarksPage() {
         const response = await listBookmarks();
         if (signal.aborted) return;
         setItems(response.items);
+        setReadings(response.furigana);
         setError(null);
       } catch (cause) {
         if (signal.aborted) return;
@@ -133,10 +136,14 @@ export function BookmarksPage() {
                   </button>
                 </div>
               </div>
-              <blockquote>{item.original_ja}</blockquote>
+              <blockquote>
+                <Furigana text={item.original_ja} readings={readings} />
+              </blockquote>
               <p>{item.translation_zh_hk}</p>
               <div className="bilingual-note">
-                <span>{item.note_ja}</span>
+                <span>
+                  <Furigana text={item.note_ja} readings={readings} />
+                </span>
                 <span>{item.note_zh_hk}</span>
               </div>
               <footer className="bookmark-source">

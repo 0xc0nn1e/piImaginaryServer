@@ -2352,3 +2352,29 @@ select {
 .bookmark-source .source-gone {
   color: var(--amber);
 }
+
+/* Hiragana reading aids over kanji. */
+ruby {
+  ruby-align: center;
+}
+
+ruby rt {
+  /* The browser default is small enough to be unreadable at body size. */
+  font-size: 0.58em;
+  font-weight: 400;
+  color: var(--muted-strong);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.highlight-card ruby rt,
+blockquote ruby rt {
+  color: var(--mint);
+}
+
+/* Ruby needs vertical room, otherwise readings collide with the line above. */
+blockquote:has(ruby),
+.transcript-list p:has(ruby),
+.bilingual-note span:has(ruby) {
+  line-height: 2.1;
+}

@@ -11,7 +11,9 @@ from audio_server.api.schemas import (
     BookmarkCreateRequest,
     BookmarkListResponse,
     BookmarkResponse,
+    FuriganaToken,
 )
+from audio_server.core.furigana import annotate_all
 from audio_server.db.models import BookmarkKind
 from audio_server.services.bookmark_service import BookmarkService
 from audio_server.web_auth.dependencies import (
@@ -38,8 +40,13 @@ def list_bookmarks(
 ) -> BookmarkListResponse:
     response.headers["Cache-Control"] = "no-store"
     items = service.list_for_user(user_id=principal.user.id, kind=kind)
+    japanese = [text for item in items for text in (item.original_ja, item.note_ja)]
     return BookmarkListResponse(
-        items=[BookmarkResponse.model_validate(item) for item in items]
+        items=[BookmarkResponse.model_validate(item) for item in items],
+        furigana={
+            text: [FuriganaToken.model_validate(token) for token in tokens]
+            for text, tokens in annotate_all(japanese).items()
+        },
     )
 
 

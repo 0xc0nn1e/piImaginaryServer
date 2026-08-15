@@ -12,6 +12,9 @@ dependencies = [
   "alembic>=1.14,<2",
   "argon2-cffi>=23.1,<26",
   "fastapi>=0.115,<1",
+  # Dictionary-based Japanese tokenizer for reading aids. Pure Python, no model
+  # download and no credentials, so it does not pull AI runtime into the API.
+  "janome>=0.5,<1",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.6,<3",
   "python-multipart>=0.0.18,<1",
@@ -64,5 +67,5 @@ strict = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["faster_whisper.*", "pyannote.*", "torch.*"]
+module = ["faster_whisper.*", "janome.*", "pyannote.*", "torch.*"]
 ignore_missing_imports = true

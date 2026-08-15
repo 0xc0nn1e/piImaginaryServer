@@ -124,6 +124,31 @@ def test_saving_the_same_quote_twice_is_idempotent(
     assert len(app_client.get("/api/v1/bookmarks").json()["items"]) == 1
 
 
+def test_bookmark_list_carries_hiragana_readings(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    """Saved quotes ship reading runs so the page can set furigana."""
+
+    headers = _sign_in(app_client)
+    recording_id = _completed_recording(app_client, wav_bytes)
+    created = app_client.post(
+        "/api/v1/bookmarks", headers=headers, json=_payload(recording_id=str(recording_id))
+    )
+    assert created.status_code == 201
+
+    body = app_client.get("/api/v1/bookmarks").json()
+
+    quote = "一旦こちらで持ち帰ります。"
+    assert quote in body["furigana"]
+    runs = body["furigana"][quote]
+    # The runs must rebuild the quote exactly, with kanji carrying readings.
+    assert "".join(run["text"] for run in runs) == quote
+    assert {run["text"]: run["reading"] for run in runs if run["reading"]} == {
+        "一旦": "いったん",
+        "持ち帰": "もちかえ",
+    }
+
+
 def test_concurrent_duplicate_save_recovers_instead_of_failing(
     app_client: TestClient, wav_bytes: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:

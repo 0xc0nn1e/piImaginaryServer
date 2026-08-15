@@ -73,6 +73,20 @@ const completedAnalysis = {
   },
   job: null,
   error: null,
+  furigana: {
+    "会議の説明です。": [
+      { text: "会議", reading: "かいぎ" },
+      { text: "の", reading: null },
+      { text: "説明", reading: "せつめい" },
+      { text: "です。", reading: null },
+    ],
+    "一旦こちらで持ち帰ります。": [
+      { text: "一旦", reading: "いったん" },
+      { text: "こちらで", reading: null },
+      { text: "持ち帰", reading: "もちかえ" },
+      { text: "ります。", reading: null },
+    ],
+  },
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -290,6 +304,29 @@ describe("recording transcript states", () => {
       end_time: 7,
     });
     expect((saved as [unknown, RequestInit])[1].headers).toBeDefined();
+  });
+
+  it("sets hiragana over the analysis description and quote", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal(
+      "fetch",
+      mockDetailApi(
+        jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+    await screen.findByRole("heading", { name: "內容摘要" });
+
+    const readings = Array.from(document.querySelectorAll("rt")).map((node) => node.textContent);
+    // The description is rendered through the same component as the quote, so
+    // both contribute readings rather than only the expression card.
+    expect(readings).toEqual(
+      expect.arrayContaining(["かいぎ", "せつめい", "いったん", "もちかえ"]),
+    );
   });
 
   it("queues reprocessing with the CSRF cookie", async () => {

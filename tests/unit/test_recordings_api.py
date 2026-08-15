@@ -346,6 +346,86 @@ def test_overlap_flags_match_the_pairwise_definition() -> None:
         assert _overlap_flags(ordered) == pairwise(ordered), spans
 
 
+def test_transcript_and_analysis_carry_hiragana_readings(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    """Both Japanese-bearing views ship reading runs for their kanji."""
+
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    recording_id = uuid.UUID(metadata["id"])
+    quote = "来週までに結論を出しましょう。"
+    with app_client.app.state.test_session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        job.status = JobStatus.COMPLETED
+        session.add(
+            TranscriptSegment(
+                recording_id=recording_id,
+                job_id=job.id,
+                sequence=0,
+                speaker_label="SPEAKER_00",
+                start_time=0,
+                end_time=1,
+                text=quote,
+                language="ja",
+                has_overlap=False,
+            )
+        )
+        session.add(
+            Analysis(
+                recording_id=recording_id,
+                job_id=job.id,
+                provider="lmstudio",
+                schema_version="2",
+                status=AnalysisStatus.COMPLETED,
+                result={
+                    "description": {"ja": "会議の説明です。", "zh_hk": "會議內容。"},
+                    "summary": None,
+                    "tags": [],
+                    "natural_expressions": [
+                        {
+                            "segment_sequence": 0,
+                            "start_time": 0.0,
+                            "end_time": 1.0,
+                            "speaker_label": "SPEAKER_00",
+                            "original_ja": quote,
+                            "translation_zh_hk": "下星期之前要有結論。",
+                            "usage_ja": "締め切りを共有する場面です。",
+                            "usage_zh_hk": "講明死線嗰陣用。",
+                        }
+                    ],
+                    "highlights": [],
+                },
+            )
+        )
+
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+    transcript = app_client.get(f"/api/v1/recordings/{recording_id}/transcript", headers=auth)
+    assert transcript.status_code == 200
+    transcript_runs = transcript.json()["furigana"][quote]
+    assert "".join(run["text"] for run in transcript_runs) == quote
+    assert {run["text"]: run["reading"] for run in transcript_runs if run["reading"]} == {
+        "来週": "らいしゅう",
+        "結論": "けつろん",
+        "出": "だ",
+    }
+
+    analysis = app_client.get(f"/api/v1/recordings/{recording_id}/analysis", headers=auth)
+    assert analysis.status_code == 200
+    readings = analysis.json()["furigana"]
+    # The quote, its usage note, and the description all get readings.
+    assert quote in readings
+    assert "締め切りを共有する場面です。" in readings
+    assert "会議の説明です。" in readings
+    # Cantonese text is never annotated.
+    assert "下星期之前要有結論。" not in readings
+
+
 def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: bytes) -> None:
     files, headers, metadata = make_upload(wav_bytes)
     app_client.post("/api/v1/recordings", files=files, headers=headers)
