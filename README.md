@@ -522,6 +522,16 @@ rather than stored, so existing recordings and saved quotes gain readings with
 no reprocessing and no migration. The analyser is pure Python with no model
 download and no credentials, so it does not bring AI runtime into the API.
 
+A numeral immediately followed by a counter is deliberately left unannotated.
+The dictionary scores the two pieces separately, which loses every irregular
+and euphonic reading — `一人` becomes いちにん rather than ひとり, `二十日`
+にじゅうにち rather than はつか, `四時` よんじ rather than よじ — and some
+pairs cannot be resolved without context at all, since `一日` is いちにち or
+ついたち depending on the sentence. UniDic was measured against the same set and
+was wrong on 11 of 22 cases where IPADIC was wrong on 14, so a heavier
+dictionary does not fix this class either. Showing those compounds bare is the
+deliberate trade: no help there, rather than confident misinformation.
+
 Its dictionary costs roughly 100 MB of resident memory and 120 ms once it is
 first built. Loading is deferred until the first Japanese string is annotated,
 so an API process that never serves one never pays it; after that each string

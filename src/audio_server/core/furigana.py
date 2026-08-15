@@ -83,6 +83,20 @@ def _trim_okurigana(surface: str, reading: str) -> tuple[str, str, str, str]:
     return surface[:prefix], core, core_reading, trailing
 
 
+def _pos(token: object) -> list[str]:
+    return str(getattr(token, "part_of_speech", "")).split(",")
+
+
+def _is_numeral(token: object) -> bool:
+    parts = _pos(token)
+    return len(parts) > 1 and parts[0] == "名詞" and parts[1] == "数"
+
+
+def _is_counter(token: object) -> bool:
+    parts = _pos(token)
+    return len(parts) > 2 and parts[0] == "名詞" and parts[1] == "接尾" and parts[2] == "助数詞"
+
+
 @lru_cache(maxsize=_MEMO_SIZE)
 def _annotate_cached(text: str) -> tuple[FuriganaToken, ...]:
     tokens: list[FuriganaToken] = []
@@ -96,8 +110,28 @@ def _annotate_cached(text: str) -> tuple[FuriganaToken, ...]:
             return
         tokens.append(FuriganaToken(text=value, reading=reading))
 
-    for token in _tokenizer().tokenize(text):
+    analysed = list(_tokenizer().tokenize(text))
+    index = 0
+    while index < len(analysed):
+        token = analysed[index]
+
+        # A numeral followed by a counter is the one class the dictionary
+        # reliably gets wrong: it scores each piece alone, losing the euphonic
+        # and irregular readings (一人 ひとり, 二十日 はつか, 四時 よじ), and
+        # some are genuinely ambiguous without context (一日 いちにち or
+        # ついたち). Emitting the concatenation would teach the wrong word, so
+        # these are shown unannotated instead.
+        if _is_numeral(token):
+            run = index
+            while run < len(analysed) and _is_numeral(analysed[run]):
+                run += 1
+            if run < len(analysed) and _is_counter(analysed[run]):
+                append("".join(item.surface for item in analysed[index : run + 1]), None)
+                index = run + 1
+                continue
+
         surface = token.surface
+        index += 1
         if not _has_kanji(surface):
             append(surface, None)
             continue

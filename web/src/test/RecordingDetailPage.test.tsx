@@ -74,6 +74,7 @@ const completedAnalysis = {
   job: null,
   error: null,
   furigana: {
+    "検討": [{ text: "検討", reading: "けんとう" }],
     "会議の説明です。": [
       { text: "会議", reading: "かいぎ" },
       { text: "の", reading: null },
@@ -322,10 +323,10 @@ describe("recording transcript states", () => {
     await screen.findByRole("heading", { name: "內容摘要" });
 
     const readings = Array.from(document.querySelectorAll("rt")).map((node) => node.textContent);
-    // The description is rendered through the same component as the quote, so
-    // both contribute readings rather than only the expression card.
+    // Description, tag and quote all render through the same component, so
+    // each contributes readings rather than only the expression card.
     expect(readings).toEqual(
-      expect.arrayContaining(["かいぎ", "せつめい", "いったん", "もちかえ"]),
+      expect.arrayContaining(["かいぎ", "せつめい", "けんとう", "いったん", "もちかえ"]),
     );
   });
 
