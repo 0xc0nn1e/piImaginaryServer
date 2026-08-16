@@ -2375,43 +2375,30 @@ blockquote ruby rt {
 /* Ruby needs vertical room, otherwise readings collide with the line above. */
 blockquote:has(ruby),
 .transcript-list p:has(ruby),
+.bilingual-grid p:has(ruby),
 .bilingual-note span:has(ruby) {
   line-height: 2.1;
 }
 
-/* The analysis view is the study surface: Japanese quotes carrying furigana
-   above them, plus their notes and summary. It therefore sets a larger scale
-   than the shared card styles. Scoped to the analysis tab on purpose — the
-   bookmarks page reuses the same card classes and keeps its own scale. */
+/* The analysis view is the study surface: the expression and highlight cards
+   carry the Japanese being learned, with furigana above it, so those cards use
+   a larger scale. The description, summary and tags above them stay at the
+   shared size. Scoped to the analysis tab on purpose — the bookmarks page
+   reuses the same card classes and keeps its own scale. */
 .analysis-stack .analysis-card blockquote {
-  font-size: 1.15rem;
+  font-size: 1.3rem;
 }
 
 .analysis-stack .analysis-card > p {
-  font-size: 1.05rem;
+  font-size: 1.12rem;
 }
 
 .analysis-stack .bilingual-note {
-  font-size: 0.88rem;
+  font-size: 0.96rem;
 }
 
+/* Timestamp and speaker are card chrome rather than study text, so they only
+   keep pace with the card instead of growing with it. */
 .analysis-stack .analysis-card-meta {
   font-size: 0.72rem;
-}
-
-.analysis-stack .tag-chip {
-  font-size: 0.86rem;
-}
-
-.analysis-stack .analysis-subheading h4 {
-  font-size: 0.98rem;
-}
-
-.analysis-stack .bilingual-grid span {
-  font-size: 0.68rem;
-}
-
-.analysis-stack .bilingual-grid p {
-  font-size: 1.05rem;
-  line-height: 1.75;
 }
