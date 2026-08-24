@@ -1,4 +1,4 @@
-import { type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
+import { type DragEvent, type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError, listRecordings, uploadWebRecording } from "../api";
@@ -46,7 +46,6 @@ export function RecordingsPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,7 +86,7 @@ export function RecordingsPage() {
     if (accepted.length) setUploadOpen(true);
   }
 
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
+  function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     addFiles(event.dataTransfer.files);
   }
@@ -209,16 +208,18 @@ export function RecordingsPage() {
               </button>
             ) : null}
           </div>
-          <div
+          <label
             className="upload-dropzone"
+            htmlFor="upload-file-input"
             onDragOver={(event) => event.preventDefault()}
             onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
           >
+            {/* The input stays in the layout and is activated by this label:
+                iOS Safari ignores click() on a display:none file input. */}
             <input
-              ref={fileInputRef}
-              accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4,audio/x-m4a"
-              hidden
+              id="upload-file-input"
+              className="visually-hidden"
+              accept="audio/*,.mp3,.wav,.m4a"
               multiple
               type="file"
               onChange={(event) => {
@@ -228,7 +229,7 @@ export function RecordingsPage() {
             />
             <strong>{t("upload.drop")}</strong>
             <span>{t("upload.help")}</span>
-          </div>
+          </label>
           {uploadItems.length ? (
             <ol className="upload-list">
               {uploadItems.map((item) => (
