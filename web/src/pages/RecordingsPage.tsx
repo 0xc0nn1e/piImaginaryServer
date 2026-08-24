@@ -45,6 +45,7 @@ export function RecordingsPage() {
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [skippedCount, setSkippedCount] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
@@ -73,7 +74,11 @@ export function RecordingsPage() {
   }, [deviceId, invalidate, navigate, offset, refreshKey, status, t]);
 
   function addFiles(files: FileList | File[]) {
-    const accepted = Array.from(files).filter((file) => /\.(mp3|wav|m4a)$/i.test(file.name));
+    const candidates = Array.from(files);
+    const accepted = candidates.filter((file) => /\.(mp3|wav|m4a)$/i.test(file.name));
+    // The picker offers every audio type, so say what was dropped instead of
+    // letting unsupported files vanish without a trace.
+    setSkippedCount(candidates.length - accepted.length);
     setUploadItems((current) => [
       ...current,
       ...accepted.map((file, index) => ({
@@ -230,6 +235,11 @@ export function RecordingsPage() {
             <strong>{t("upload.drop")}</strong>
             <span>{t("upload.help")}</span>
           </label>
+          {skippedCount ? (
+            <div className="notice notice-error" role="alert">
+              {t("upload.skipped").replace("{count}", String(skippedCount))}
+            </div>
+          ) : null}
           {uploadItems.length ? (
             <ol className="upload-list">
               {uploadItems.map((item) => (
