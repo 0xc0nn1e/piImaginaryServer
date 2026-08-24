@@ -170,7 +170,7 @@ class RecordingService:
         filename: str,
         started_at: datetime | None,
     ) -> IngestResult:
-        """Ingest a browser MP3/WAV upload without trusting its filename or MIME type."""
+        """Ingest a browser MP3/WAV/M4A upload without trusting its filename or MIME type."""
 
         if started_at is not None and (
             started_at.tzinfo is None or started_at.utcoffset() is None
@@ -194,10 +194,10 @@ class RecordingService:
         final_key: str | None = None
         try:
             probe = self._probe(staged)
-            if probe.preferred_extension not in {".mp3", ".wav"}:
+            if probe.preferred_extension not in {".mp3", ".wav", ".m4a"}:
                 raise RecordingServiceError(
                     "web_audio_type_unsupported",
-                    "Browser uploads must be valid MP3 or WAV audio.",
+                    "Browser uploads must be valid MP3, WAV, or M4A audio.",
                     status_code=415,
                 )
             with self._session_factory() as session:

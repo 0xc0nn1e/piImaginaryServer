@@ -465,7 +465,7 @@ must inspect and quarantine repeatedly rejected client items.
 | `GET` | `/api/v1/auth/me` | Return the current web administrator and session expiry. |
 | `POST` | `/api/v1/auth/logout` | Revoke the current session with CSRF validation. |
 | `POST` | `/api/v1/recordings` | Validate, durably store, enqueue, and return immediately. |
-| `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV browser upload. |
+| `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV/M4A browser upload. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/audio` | Session-protected original audio stream with HTTP byte-range support. |
@@ -547,7 +547,7 @@ five browser routes:
 
 - `/setup`: one-time administrator creation
 - `/login`: administrator sign-in
-- `/recordings`: paginated/filterable list and sequential multi-file MP3/WAV upload
+- `/recordings`: paginated/filterable list and sequential multi-file MP3/WAV/M4A upload
 - `/recordings/{id}`: metadata, current stage, safe activity, editable transcript,
   bilingual analysis, separate retranscription/reanalysis, and permanent deletion
 - `/bookmarks`: saved natural expressions and highlights, filterable by kind, each

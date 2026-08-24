@@ -115,6 +115,49 @@ def test_browser_session_uploads_wav_idempotently_with_started_at(
     }
 
 
+def test_browser_upload_accepts_m4a_and_stores_the_probed_identity(
+    app_client: TestClient,
+    wav_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _setup_and_login(app_client)
+    csrf_token = app_client.cookies.get("audio_server_csrf")
+    assert csrf_token
+
+    def m4a_probe(_source: Path) -> AudioProbe:
+        return AudioProbe(
+            duration_seconds=1,
+            codec_name="aac",
+            format_name="mov,mp4,m4a,3gp,3g2,mj2",
+            sample_rate=16_000,
+            channels=1,
+            mime_type="audio/mp4",
+            preferred_extension=".m4a",
+        )
+
+    monkeypatch.setattr(app_client.app.state.recording_service._audio, "probe", m4a_probe)
+    response = app_client.post(
+        "/api/v1/web/recordings",
+        headers={"Origin": ORIGIN, "X-CSRF-Token": csrf_token},
+        files={"audio": ("memo.m4a", wav_bytes, "audio/mp4")},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "queued"
+    recording_id = uuid.UUID(response.json()["recording_id"])
+    with app_client.app.state.test_session_factory() as session:
+        recording = session.get(Recording, recording_id)
+        assert recording is not None
+        # The probe, not the client filename or its MIME label, is authoritative.
+        assert recording.mime_type == "audio/mp4"
+        assert recording.audio_format == "m4a"
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert job is not None
+        assert job.status is JobStatus.QUEUED
+
+
 def test_browser_upload_requires_origin_and_csrf_before_acceptance(
     app_client: TestClient,
     wav_bytes: bytes,
@@ -164,12 +207,12 @@ def test_browser_upload_rejects_bad_time_unsupported_media_and_declared_size(
     def unsupported_probe(_source: Path) -> AudioProbe:
         return AudioProbe(
             duration_seconds=1,
-            codec_name="aac",
-            format_name="mov,mp4,m4a,3gp,3g2,mj2",
+            codec_name="flac",
+            format_name="flac",
             sample_rate=16_000,
             channels=1,
-            mime_type="audio/mp4",
-            preferred_extension=".m4a",
+            mime_type="audio/flac",
+            preferred_extension=".flac",
         )
 
     monkeypatch.setattr(app_client.app.state.recording_service._audio, "probe", unsupported_probe)

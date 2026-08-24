@@ -215,7 +215,14 @@ describe("application routes", () => {
         if (file.name === "first.wav") {
           return jsonResponse({ error: { code: "invalid", message: "bad file" } }, 415);
         }
-        return jsonResponse({ recording_id: "recording-2", status: "queued", duplicate: false }, 201);
+        return jsonResponse(
+          {
+            recording_id: file.name === "third.m4a" ? "recording-3" : "recording-2",
+            status: "queued",
+            duplicate: false,
+          },
+          201,
+        );
       }
       throw new Error(`Unexpected request: ${path}`);
     });
@@ -230,15 +237,17 @@ describe("application routes", () => {
     await browser.upload(input, [
       new File(["one"], "first.wav", { type: "audio/wav", lastModified: 1 }),
       new File(["two"], "second.mp3", { type: "audio/mpeg", lastModified: 2 }),
+      new File(["three"], "third.m4a", { type: "audio/mp4", lastModified: 3 }),
     ]);
     await browser.click(screen.getByRole("button", { name: "開始上載" }));
 
-    await waitFor(() => expect(uploadOrder).toEqual(["first.wav", "second.mp3"]));
+    await waitFor(() =>
+      expect(uploadOrder).toEqual(["first.wav", "second.mp3", "third.m4a"]),
+    );
     expect(maxActiveUploads).toBe(1);
     expect(await screen.findByText("上載失敗；系統會繼續處理下一個檔案。")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "開啟結果" })).toHaveAttribute(
-      "href",
-      "/recordings/recording-2",
-    );
+    expect(
+      screen.getAllByRole("link", { name: "開啟結果" }).map((link) => link.getAttribute("href")),
+    ).toEqual(["/recordings/recording-2", "/recordings/recording-3"]);
   });
 });

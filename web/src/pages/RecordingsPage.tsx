@@ -74,7 +74,7 @@ export function RecordingsPage() {
   }, [deviceId, invalidate, navigate, offset, refreshKey, status, t]);
 
   function addFiles(files: FileList | File[]) {
-    const accepted = Array.from(files).filter((file) => /\.(mp3|wav)$/i.test(file.name));
+    const accepted = Array.from(files).filter((file) => /\.(mp3|wav|m4a)$/i.test(file.name));
     setUploadItems((current) => [
       ...current,
       ...accepted.map((file, index) => ({
@@ -195,7 +195,7 @@ export function RecordingsPage() {
         <section className="panel upload-panel" aria-label={t("upload.title")}>
           <div className="panel-heading-row">
             <div>
-              <p className="panel-kicker">MP3 / WAV</p>
+              <p className="panel-kicker">MP3 / WAV / M4A</p>
               <h2>{t("upload.title")}</h2>
             </div>
             {uploadItems.length ? (
@@ -217,7 +217,7 @@ export function RecordingsPage() {
           >
             <input
               ref={fileInputRef}
-              accept=".mp3,.wav,audio/mpeg,audio/wav"
+              accept=".mp3,.wav,.m4a,audio/mpeg,audio/wav,audio/mp4,audio/x-m4a"
               hidden
               multiple
               type="file"
