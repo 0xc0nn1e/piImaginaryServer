@@ -5,6 +5,7 @@ import { AppLayout } from "./components/AppLayout";
 import { HomeRedirect, LoginGuard, RequireAuth, SetupGuard } from "./components/RouteGuards";
 import { LanguageProvider } from "./i18n";
 import { BookmarksPage } from "./pages/BookmarksPage";
+import { QueuePage } from "./pages/QueuePage";
 import { LoginPage } from "./pages/LoginPage";
 import { RecordingDetailPage } from "./pages/RecordingDetailPage";
 import { RecordingsPage } from "./pages/RecordingsPage";
@@ -42,6 +43,7 @@ export function App() {
             >
               <Route path="/recordings" element={<RecordingsPage />} />
               <Route path="/recordings/:id" element={<RecordingDetailPage />} />
+              <Route path="/queue" element={<QueuePage />} />
               <Route path="/bookmarks" element={<BookmarksPage />} />
             </Route>
             <Route path="*" element={<HomeRedirect />} />

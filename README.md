@@ -227,6 +227,7 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `FFMPEG_BINARY` / `FFPROBE_BINARY` | executable names | Explicit binary locations when not on `PATH`. |
 | `FFMPEG_TIMEOUT_SECONDS` | `3600` | Upper bound for preprocessing. |
 | `PROCESSING_WORKERS` | `1` | Number of worker processes; each loads its own model copies. |
+| `WORKER_JOB_KINDS` | empty | Job kinds this worker may claim: `full`, `analysis`, or both. Empty means every kind. |
 | `PROCESSING_MAX_ATTEMPTS` | `3` | Automatic attempt limit for retryable failures. |
 | `JOB_POLL_SECONDS` | `1` | Delay when no job is available. |
 | `JOB_HEARTBEAT_SECONDS` | `30` | Active-job heartbeat interval. |
@@ -658,6 +659,26 @@ original as temporary data. Automated, job-aware cleanup remains roadmap work.
 The default is one processing worker. Raising `PROCESSING_WORKERS` loads one
 Whisper and diarization model copy per process and can exhaust RAM or VRAM.
 Upload concurrency is independent of this setting.
+
+### Separating analysis from transcription
+
+One queue holds both job kinds, and a claim takes the oldest available job
+regardless of kind. A `full` job occupies its worker for the whole
+transcription, so an `analysis` job -- a single network call to LM Studio --
+can otherwise wait hours behind CPU-bound work it does not depend on.
+
+`WORKER_JOB_KINDS` restricts which kinds a worker claims. A worker that omits
+`full` never loads Whisper or pyannote, so an analysis-only worker costs a
+process rather than gigabytes of model memory. Compose runs `worker` with
+`full` and `analysis-worker` with `analysis`, which keeps analysis responsive
+while transcription saturates the CPU. Both services build the same
+`wave-archive-worker:latest` tag, so one rebuild updates both and neither can
+be left running older code.
+
+Leaving the value empty keeps the original behaviour of one worker claiming
+every kind. Run at least one worker that claims `analysis`, or analyses stay
+queued forever; a Compose deployment that starts only the `worker` service has
+no analysis worker.
 
 ## Speech-to-text strategy
 

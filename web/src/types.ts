@@ -74,6 +74,18 @@ export interface JobStatusDetails {
   error: JobError | null;
 }
 
+export interface QueueEntry {
+  recording_id: string;
+  original_filename: string;
+  job: JobStatusDetails;
+}
+
+export interface QueueResponse {
+  items: QueueEntry[];
+  processing: number;
+  queued: number;
+}
+
 export interface RecordingStatusResponse {
   recording_id: string;
   status: RecordingStatus;

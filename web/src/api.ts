@@ -7,6 +7,7 @@ import type {
   BookmarkKind,
   BookmarkListResponse,
   ProcessingRequestResponse,
+  QueueResponse,
   RecordingListResponse,
   RecordingStatus,
   RecordingStatusResponse,
@@ -259,4 +260,8 @@ function requireCsrfCookie(): string {
   const token = readCsrfCookie();
   if (!token) throw new Error("CSRF cookie is unavailable");
   return token;
+}
+
+export function getQueue(): Promise<QueueResponse> {
+  return request<QueueResponse>("/api/v1/queue");
 }

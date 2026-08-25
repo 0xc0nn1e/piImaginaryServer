@@ -60,7 +60,7 @@ class PipelineJobProcessor:
         *,
         session_factory: Callable[[], Session],
         storage: StorageBackend,
-        pipeline: ProcessingPipeline,
+        pipeline: ProcessingPipeline | None = None,
         analysis_provider: AnalysisProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -71,6 +71,14 @@ class PipelineJobProcessor:
     def __call__(self, claim: ClaimedJob, progress: ProgressCallback) -> ResultPersister:
         if claim.kind is JobKind.ANALYSIS:
             return self._process_analysis(claim)
+        if self._pipeline is None:
+            # claim_next is filtered by kind, so this only fires if a worker is
+            # misconfigured; fail loudly rather than silently dropping the job.
+            raise PermanentProcessingError(
+                code="transcription_worker_unavailable",
+                safe_message="This worker does not process transcription jobs.",
+            )
+        pipeline = self._pipeline
         with self._session_factory() as session:
             recording = session.scalar(select(Recording).where(Recording.id == claim.recording_id))
             if recording is None:
@@ -83,7 +91,7 @@ class PipelineJobProcessor:
         work_dir = self._storage.work_directory(claim.id, claim.claim_token)
         try:
             with self._storage.materialize(storage_key) as source_path:
-                result = self._pipeline.run(
+                result = pipeline.run(
                     recording_id=claim.recording_id,
                     source_path=source_path,
                     work_dir=work_dir,
@@ -243,8 +251,22 @@ def build_worker(worker_index: int) -> Worker:
         ),
     )
 
+    job_kinds = _parse_job_kinds(settings.worker_job_kinds)
+    transcribes = job_kinds is None or JobKind.FULL in job_kinds
+
     def processor_factory() -> JobProcessor:
         analysis_provider = _build_analysis_provider(settings)
+        if not transcribes:
+            # An analysis-only worker must not pay for Whisper and pyannote:
+            # loading them would cost gigabytes of memory it never uses.
+            load = getattr(analysis_provider, "load", None)
+            if callable(load):
+                load()
+            return PipelineJobProcessor(
+                session_factory=database.session_factory,
+                storage=storage,
+                analysis_provider=analysis_provider,
+            )
         pipeline = _build_pipeline(settings, analysis_provider=analysis_provider)
         pipeline.load_providers()
         return PipelineJobProcessor(
@@ -262,7 +284,15 @@ def build_worker(worker_index: int) -> Worker:
             heartbeat_seconds=settings.job_heartbeat_seconds,
             recovery_seconds=settings.job_recovery_seconds,
         ),
+        job_kinds=job_kinds,
     )
+
+
+def _parse_job_kinds(value: str) -> frozenset[JobKind] | None:
+    """Return the job kinds this worker may claim, or None for every kind."""
+
+    kinds = frozenset(JobKind(entry) for entry in value.split(",") if entry)
+    return kinds or None
 
 
 def _build_pipeline(

@@ -11,7 +11,7 @@ from __future__ import annotations
 import enum
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, TypeAlias
@@ -292,18 +292,32 @@ class JobQueue:
         self.lease_duration = lease_duration
         self.retry_policy = retry_policy or RetryPolicy()
 
-    def claim_next(self, *, now: datetime | None = None) -> ClaimedJob | None:
-        """Atomically lease the oldest available job without blocking peers."""
+    def claim_next(
+        self,
+        *,
+        now: datetime | None = None,
+        kinds: Collection[JobKind] | None = None,
+    ) -> ClaimedJob | None:
+        """Atomically lease the oldest available job without blocking peers.
+
+        ``kinds`` restricts the claim to those job kinds. A worker that only
+        handles analysis therefore never leases a transcription job it has no
+        providers for, and cheap analysis work stops queueing behind hours of
+        CPU-bound transcription.
+        """
 
         claimed_at = now or _utcnow()
         token = uuid.uuid4()
+        conditions = [
+            ProcessingJob.status == JobStatus.QUEUED,
+            ProcessingJob.available_at <= claimed_at,
+        ]
+        if kinds is not None:
+            conditions.append(ProcessingJob.kind.in_(tuple(kinds)))
         with self._session_factory() as session, session.begin():
             job = session.scalar(
                 select(ProcessingJob)
-                .where(
-                    ProcessingJob.status == JobStatus.QUEUED,
-                    ProcessingJob.available_at <= claimed_at,
-                )
+                .where(*conditions)
                 .order_by(ProcessingJob.available_at, ProcessingJob.created_at, ProcessingJob.id)
                 .with_for_update(skip_locked=True)
                 .limit(1)

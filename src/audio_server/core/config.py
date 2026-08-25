@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     lm_studio_chunk_chars: int = 12_000
     lm_studio_max_tokens: int = 4096
 
+    worker_job_kinds: str = ""
+
     audio_retention_days: int | None = None
     transcript_retention_days: int | None = None
 
@@ -95,6 +97,14 @@ class Settings(BaseSettings):
         if not value.startswith(("postgresql+psycopg://", "sqlite+pysqlite://")):
             raise ValueError("DATABASE_URL must use postgresql+psycopg or sqlite+pysqlite")
         return value
+
+    @field_validator("worker_job_kinds")
+    @classmethod
+    def validate_worker_job_kinds(cls, value: str) -> str:
+        entries = [item.strip() for item in value.split(",") if item.strip()]
+        if any(entry not in {"full", "analysis"} for entry in entries):
+            raise ValueError("WORKER_JOB_KINDS may only list full and analysis")
+        return ",".join(entries)
 
     @field_validator("log_level")
     @classmethod

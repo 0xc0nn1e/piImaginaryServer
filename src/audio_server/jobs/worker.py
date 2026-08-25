@@ -11,7 +11,7 @@ import signal
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import timedelta
 from types import FrameType, TracebackType
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from audio_server.core.config import get_settings
 from audio_server.core.logging import configure_logging
-from audio_server.db.models import JobStage
+from audio_server.db.models import JobKind, JobStage
 from audio_server.jobs.queue import (
     ClaimedJob,
     ClaimLostError,
@@ -151,10 +151,12 @@ class Worker:
         processor_factory: Callable[[], ProcessorT],
         *,
         intervals: WorkerIntervals | None = None,
+        job_kinds: Collection[JobKind] | None = None,
     ) -> None:
         self.queue = queue
         self._processor_factory: ProcessorFactory = processor_factory
         self.intervals = intervals or WorkerIntervals()
+        self.job_kinds = frozenset(job_kinds) if job_kinds is not None else None
         if self.intervals.heartbeat_seconds * 2 >= queue.lease_duration.total_seconds():
             raise ValueError("lease duration must exceed two heartbeat intervals")
         self._processor: JobProcessor | None = None
@@ -193,7 +195,7 @@ class Worker:
         if processor is None:  # pragma: no cover - defensive type narrowing
             raise RuntimeError("worker processor did not initialize")
 
-        claim = self.queue.claim_next()
+        claim = self.queue.claim_next(kinds=self.job_kinds)
         if claim is None:
             return False
 

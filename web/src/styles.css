@@ -2420,3 +2420,55 @@ blockquote:has(ruby),
 .analysis-stack .analysis-card-meta {
   font-size: 0.72rem;
 }
+
+.queue-help {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 14px;
+}
+
+.queue-counts {
+  color: var(--muted-strong);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.queue-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.queue-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgb(189 124 255 / 22%);
+  border-radius: 12px;
+}
+
+.queue-list li[data-status="processing"] {
+  border-color: rgb(189 124 255 / 60%);
+  background: linear-gradient(135deg, var(--violet-soft), transparent);
+}
+
+.queue-list li small {
+  color: var(--muted);
+  display: block;
+  font-size: 0.78rem;
+}
+
+.queue-time {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.queue-section h3 {
+  color: var(--muted-strong);
+  font-size: 0.85rem;
+  margin: 18px 0 8px;
+}

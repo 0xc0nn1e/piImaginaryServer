@@ -142,6 +142,20 @@ class JobStatusResponse(BaseModel):
     error: JobError | None = None
 
 
+class QueueEntryResponse(BaseModel):
+    recording_id: uuid.UUID
+    original_filename: str
+    job: JobStatusResponse
+
+
+class QueueResponse(BaseModel):
+    """Everything a worker could claim right now, in claim order."""
+
+    items: list[QueueEntryResponse]
+    processing: int
+    queued: int
+
+
 class RecordingStatusResponse(BaseModel):
     recording_id: uuid.UUID
     status: RecordingStatus

@@ -9,6 +9,7 @@ from audio_server.api.activity import router as activity_router
 from audio_server.api.bookmarks import router as bookmarks_router
 from audio_server.api.errors import register_error_handlers
 from audio_server.api.health import router as health_router
+from audio_server.api.jobs import router as queue_router
 from audio_server.api.middleware import MULTIPART_OVERHEAD_BYTES, ApiRequestGuardMiddleware
 from audio_server.api.recordings import router as recordings_router
 from audio_server.api.web_recordings import router as web_recordings_router
@@ -105,6 +106,7 @@ def create_app(
     register_web_auth_error_handler(application)
     application.include_router(health_router)
     application.include_router(web_auth_router)
+    application.include_router(queue_router)
     application.include_router(recordings_router)
     application.include_router(web_recordings_router)
     application.include_router(activity_router)

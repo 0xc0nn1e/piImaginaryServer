@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath, PurePosixPath
 from typing import BinaryIO
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -344,6 +344,49 @@ class RecordingService:
                     "analysis_not_ready", "Analysis is not available yet.", status_code=409
                 )
             return analysis
+
+    def list_active_jobs(
+        self, *, limit: int = 50, kind: JobKind | None = None
+    ) -> list[tuple[Recording, ProcessingJob]]:
+        """Return unfinished jobs in the order a worker would claim them.
+
+        Processing jobs come first so the view leads with what is running now;
+        the rest follow by `available_at`, which is the queue's claim order.
+        """
+
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(Recording, ProcessingJob)
+                .join(ProcessingJob, ProcessingJob.recording_id == Recording.id)
+                .where(
+                    ProcessingJob.status.in_((JobStatus.QUEUED, JobStatus.PROCESSING)),
+                    *(() if kind is None else (ProcessingJob.kind == kind,)),
+                )
+                .order_by(
+                    ProcessingJob.status != JobStatus.PROCESSING,
+                    ProcessingJob.available_at,
+                    ProcessingJob.created_at,
+                    ProcessingJob.id,
+                )
+                .limit(limit)
+            ).all()
+            return [(recording, job) for recording, job in rows]
+
+    def count_active_jobs(self) -> tuple[int, int]:
+        """Return (processing, queued) across every unfinished job.
+
+        The listing is capped, so these totals must be counted separately or a
+        backlog larger than the cap would be reported as the cap itself.
+        """
+
+        with self._session_factory() as session:
+            rows = session.execute(
+                select(ProcessingJob.status, func.count())
+                .where(ProcessingJob.status.in_((JobStatus.QUEUED, JobStatus.PROCESSING)))
+                .group_by(ProcessingJob.status)
+            ).all()
+            counts = {status: total for status, total in rows}
+            return counts.get(JobStatus.PROCESSING, 0), counts.get(JobStatus.QUEUED, 0)
 
     def get_analysis_state(
         self, recording_id: uuid.UUID
