@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from audio_server.api.schemas import (
     AnalysisHighlight,
@@ -68,6 +69,9 @@ class LMStudioSettings:
             raise ValueError("LM Studio chunk size is out of range")
         if not 256 <= self.max_tokens <= 32_768:
             raise ValueError("LM Studio max tokens is out of range")
+
+
+logger = logging.getLogger(__name__)
 
 
 class _DraftDescription(BaseModel):
@@ -304,11 +308,56 @@ class LMStudioAnalysisProvider:
             if not isinstance(parsed, Mapping):
                 raise ValueError("LM Studio structured response is missing parsed data")
             return _AnalysisDraft.model_validate(parsed)
+        except ValidationError as exc:
+            # Field paths and rule names only. The rejected values are model
+            # output and must never reach the log.
+            logger.warning(
+                "LM Studio analysis failed schema validation",
+                extra={"violations": _safe_violations(exc)},
+            )
+            raise PermanentProcessingError(
+                code="lmstudio_schema_invalid",
+                safe_message="LM Studio returned an invalid structured analysis.",
+            ) from exc
         except (TypeError, ValueError) as exc:
             raise PermanentProcessingError(
                 code="lmstudio_schema_invalid",
                 safe_message="LM Studio returned an invalid structured analysis.",
             ) from exc
+
+
+_KNOWN_DRAFT_FIELDS = frozenset(
+    name
+    for model in (
+        _AnalysisDraft,
+        _DraftDescription,
+        _DraftTag,
+        _DraftExpression,
+        _DraftHighlight,
+    )
+    for name in model.model_fields
+)
+
+
+def _safe_violations(error: ValidationError) -> list[str]:
+    """Describe a failed validation as `field.path:rule` without any values."""
+
+    return sorted({f"{_safe_path(item['loc'])}:{item['type']}" for item in error.errors()})
+
+
+def _safe_path(location: Sequence[object]) -> str:
+    """Render a validation path from known names and indices only.
+
+    An `extra_forbidden` violation puts the model-invented key straight into
+    the path, so anything the schema does not declare is redacted rather than
+    logged.
+    """
+
+    parts = [
+        str(part) if isinstance(part, int) or part in _KNOWN_DRAFT_FIELDS else "<redacted>"
+        for part in location
+    ]
+    return ".".join(parts) or "<root>"
 
 
 def chunk_transcript(

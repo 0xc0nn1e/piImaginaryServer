@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
+from audio_server.processing import analysis
 from audio_server.processing.analysis import (
     LMStudioAnalysisProvider,
     LMStudioSettings,
@@ -273,3 +275,50 @@ def test_chunking_covers_oversized_segment_tail() -> None:
     assert "開始" in chunks[0]
     assert "終了" in chunks[-1]
     assert all(len(chunk) <= 1000 for chunk in chunks)
+
+
+def test_safe_violations_reports_paths_and_rules_without_model_content() -> None:
+    secret = "機密の発話内容"
+    draft = {
+        "description": {"ja": "あ", "zh_hk": "a"},
+        "summary": {"ja": "あ", "zh_hk": "a"},
+        "tags": [{"ja": secret, "zh_hk": "a"} for _ in range(15)],
+        "natural_expressions": [
+            {
+                "segment_sequence": 0,
+                "original_ja": "",
+                "translation_zh_hk": "a",
+                "usage_ja": "a",
+                "usage_zh_hk": "a",
+            }
+        ],
+        "highlights": [],
+    }
+
+    with pytest.raises(ValidationError) as caught:
+        analysis._AnalysisDraft.model_validate(draft)
+
+    violations = analysis._safe_violations(caught.value)
+    assert "tags:too_long" in violations
+    assert "natural_expressions.0.original_ja:string_too_short" in violations
+    # The rejected values are model output and must never reach the log.
+    assert all(secret not in line for line in violations)
+
+
+def test_safe_violations_redacts_model_invented_keys() -> None:
+    leaked_key = "モデルが勝手に作ったキー"
+    draft = {
+        "description": {"ja": "あ", "zh_hk": "a"},
+        "summary": {"ja": "あ", "zh_hk": "a"},
+        "tags": [],
+        "natural_expressions": [],
+        "highlights": [],
+        leaked_key: "value",
+    }
+
+    with pytest.raises(ValidationError) as caught:
+        analysis._AnalysisDraft.model_validate(draft)
+
+    violations = analysis._safe_violations(caught.value)
+    # extra="forbid" puts the model's own key in the path; it must not be logged.
+    assert violations == ["<redacted>:extra_forbidden"]
