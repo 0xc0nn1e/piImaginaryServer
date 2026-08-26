@@ -2588,3 +2588,18 @@ blockquote:has(ruby),
   font-size: 0.7rem;
   line-height: 1.4;
 }
+
+.translation-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.translation-confirm input {
+  accent-color: rgb(189 124 255);
+  cursor: pointer;
+}

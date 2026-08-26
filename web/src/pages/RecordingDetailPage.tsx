@@ -95,7 +95,7 @@ export function RecordingDetailPage() {
   // replace the transcript mid-edit, and reading it late would let this write
   // silently overwrite a translation the editor never saw.
   const [translationDraft, setTranslationDraft] = useState<
-    { revision: number; values: Record<string, string> } | null
+    { revision: number; selected: Record<string, string> } | null
   >(null);
   const wasTranslating = useRef(false);
   const editing = useRef(false);
@@ -409,13 +409,14 @@ export function RecordingDetailPage() {
   async function saveTranslations() {
     if (!translationDraft || !shownTranscript) return;
     const edited = shownTranscript.translations
-      // A row is sent when it was opened, not only when it was retyped.
-      // Confirming that a stale rendering still reads correctly is the whole
-      // point of the editor, and it clears the flag and refreshes the snapshot.
-      .filter((item) => item.start_segment_id !== null && item.id in translationDraft.values)
+      // Only rows the reviewer deliberately picked. Typing selects a row, and
+      // so does its checkbox, but moving through the form with Tab does not:
+      // focus is navigation, and recording it as review would be a false claim
+      // written to the database.
+      .filter((item) => item.start_segment_id !== null && item.id in translationDraft.selected)
       .map((item) => ({
         start_segment_id: item.start_segment_id as string,
-        text_zh_hk: translationDraft.values[item.id] ?? item.text_zh_hk,
+        text_zh_hk: translationDraft.selected[item.id] ?? item.text_zh_hk,
       }));
     if (!edited.length) {
       setMutationMessage(t("detail.translationsUntouched"));
@@ -719,7 +720,7 @@ export function RecordingDetailPage() {
               {translationDraft ? <>
                 <button className="button" disabled={mutationPending !== null} type="button" onClick={() => void saveTranslations()}>{mutationPending === "translations" ? t("detail.saving") : t("detail.save")}</button>
                 <button className="button button-secondary" type="button" onClick={() => { setTranslationDraft(null); setTranscriptRefreshKey((current) => current + 1); }}>{t("detail.cancel")}</button>
-              </> : <button className="button button-secondary" type="button" onClick={() => setTranslationDraft({ revision: shownTranscript.translation_revision, values: {} })}>{t("detail.edit")}</button>}
+              </> : <button className="button button-secondary" type="button" onClick={() => setTranslationDraft({ revision: shownTranscript.translation_revision, selected: {} })}>{t("detail.edit")}</button>}
             </div> : null}
           </div>
           {transcript.kind === "loading" || transcript.kind === "idle" ? <LoadingView label={t("detail.transcriptLoading")} /> : null}
@@ -733,31 +734,37 @@ export function RecordingDetailPage() {
                   <p className="translation-source"><Furigana text={spanText(shownTranscript, item) ?? item.source_ja} readings={transcriptReadings} /></p>
                   {item.start_segment_id === null ? <small className="translation-detached">{t("detail.translationDetached")}</small> : null}
                   {translationDraft && item.start_segment_id !== null ? (
-                    <textarea
+                    <><textarea
                       aria-label={t("detail.translationField")}
                       rows={2}
-                      onFocus={() =>
-                        setTranslationDraft((current) =>
-                          current && !(item.id in current.values)
-                            ? {
-                                ...current,
-                                values: { ...current.values, [item.id]: item.text_zh_hk },
-                              }
-                            : current,
-                        )
-                      }
-                      value={translationDraft.values[item.id] ?? item.text_zh_hk}
+                      value={translationDraft.selected[item.id] ?? item.text_zh_hk}
                       onChange={(event) =>
                         setTranslationDraft((current) =>
                           current
                             ? {
                                 ...current,
-                                values: { ...current.values, [item.id]: event.target.value },
+                                selected: { ...current.selected, [item.id]: event.target.value },
                               }
                             : current,
                         )
                       }
                     />
+                    <label className="translation-confirm">
+                      <input
+                        type="checkbox"
+                        checked={item.id in translationDraft.selected}
+                        onChange={(event) =>
+                          setTranslationDraft((current) => {
+                            if (!current) return current;
+                            const selected = { ...current.selected };
+                            if (event.target.checked) selected[item.id] = item.text_zh_hk;
+                            else delete selected[item.id];
+                            return { ...current, selected };
+                          })
+                        }
+                      />
+                      {t("detail.translationConfirm")}
+                    </label></>
                   ) : (
                     <p className={item.stale ? "segment-translation is-stale" : "segment-translation"}>
                       {item.text_zh_hk}

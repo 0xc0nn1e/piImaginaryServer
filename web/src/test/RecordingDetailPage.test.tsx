@@ -921,8 +921,9 @@ describe("confirming a stale translation without retyping it", () => {
     await browser.click(screen.getByRole("button", { name: "編輯" }));
 
     // The reviewer reads the sentence, decides the wording still holds, and
-    // saves without retyping it.
-    await browser.click(screen.getAllByRole("textbox", { name: "廣東話譯文" })[0]);
+    // ticks it rather than retyping it. Merely tabbing onto the field must not
+    // count, so the confirmation has to be an act of its own.
+    await browser.click(screen.getByRole("checkbox", { name: "確認呢句譯文" }));
     await browser.click(screen.getByRole("button", { name: "儲存" }));
 
     // Requiring a text change would leave the row stale forever, and a later
@@ -931,5 +932,70 @@ describe("confirming a stale translation without retyping it", () => {
     expect(captured[0].translations).toEqual([
       { start_segment_id: "segment-1", text_zh_hk: "去咗。" },
     ]);
+  });
+
+  it("does not count tabbing through the form as review", async () => {
+    const rows = [0, 1].map((index) => ({
+      id: `translation-${index}`,
+      start_segment_id: `segment-${index}`,
+      end_segment_id: `segment-${index}`,
+      source_ja: "行きました。",
+      text_zh_hk: `譯文${index}`,
+      source: "llm",
+      stale: true,
+    }));
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 2,
+      text: "",
+      segments: rows.map((row, index) => ({
+        id: row.start_segment_id,
+        sequence: index,
+        speaker_label: "SPEAKER_00",
+        start_time: index,
+        end_time: index + 1,
+        text: "行きました。",
+        language: "ja",
+        confidence: null,
+        has_overlap: false,
+      })),
+      translations: rows,
+      translation_revision: 5,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    const captured: unknown[] = [];
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/translations") && init?.method === "PUT") {
+        captured.push(JSON.parse(String(init.body)));
+        return Promise.resolve(jsonResponse(transcript));
+      }
+      if (path.endsWith("/transcript")) return Promise.resolve(jsonResponse(transcript));
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+    await screen.findByText("譯文0");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    // Keyboard navigation moves focus across every field without reading a word.
+    await browser.tab();
+    await browser.tab();
+    await browser.tab();
+    await browser.tab();
+    await browser.click(screen.getByRole("button", { name: "儲存" }));
+
+    // Recording that as review would write a false human confirmation and clear
+    // the stale flag on sentences nobody looked at.
+    expect(captured).toEqual([]);
+    expect(await screen.findByText(/請先揀要儲存嘅譯文/)).toBeInTheDocument();
   });
 });
