@@ -182,12 +182,34 @@ class TranscriptSegmentResponse(BaseModel):
     has_overlap: bool
 
 
+class TranslationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_segment_id: uuid.UUID
+    text_zh_hk: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text_zh_hk")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("translation text cannot be blank")
+        return stripped
+
+
+class TranslationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    translations: list[TranslationUpdate]
+
+
 class TranscriptTranslationResponse(BaseModel):
     """A Cantonese sentence and the transcript segments it covers."""
 
     id: uuid.UUID
-    start_segment_id: uuid.UUID
-    end_segment_id: uuid.UUID
+    start_segment_id: uuid.UUID | None
+    end_segment_id: uuid.UUID | None
     source_ja: str
     text_zh_hk: str
     source: TranslationSource

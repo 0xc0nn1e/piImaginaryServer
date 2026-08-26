@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath, PurePosixPath
@@ -19,6 +19,7 @@ from audio_server.api.schemas import (
     AnalysisResultV2,
     ClientRecordingMetadata,
     TranscriptSegmentUpdate,
+    TranslationUpdate,
 )
 from audio_server.db.activity_models import (
     ProcessingActivity,
@@ -35,6 +36,7 @@ from audio_server.db.models import (
     RecordingStatus,
     TranscriptSegment,
     TranscriptTranslation,
+    TranslationSource,
 )
 from audio_server.processing.contracts import AudioPreprocessor, AudioProbe
 from audio_server.processing.errors import (
@@ -639,6 +641,81 @@ class RecordingService:
             kind=JobKind.ANALYSIS,
         )
 
+    def update_translations(
+        self,
+        recording_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        updates: Sequence[TranslationUpdate],
+    ) -> tuple[Recording, list[TranscriptTranslation]]:
+        """Replace hand-written renderings for sentences that already exist."""
+
+        with self._session_factory.begin() as session:
+            recording = session.get(Recording, recording_id, with_for_update=True)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            if recording.translation_revision != expected_revision:
+                raise RecordingServiceError(
+                    "translation_revision_conflict",
+                    "The translations changed in another session. Reload before saving.",
+                    status_code=409,
+                )
+            self._reject_active_job(session, recording_id)
+            # A detached rendering has no sentence to save against, so it is
+            # not addressable here; it stays visible until the words come back.
+            stored = {
+                row.start_segment_id: row
+                for row in session.scalars(
+                    select(TranscriptTranslation)
+                    .where(TranscriptTranslation.recording_id == recording_id)
+                    .with_for_update()
+                )
+            }
+            segments = list(
+                session.scalars(
+                    select(TranscriptSegment)
+                    .where(TranscriptSegment.recording_id == recording_id)
+                    .order_by(TranscriptSegment.sequence)
+                )
+            )
+            sequence_of = {segment.id: segment.sequence for segment in segments}
+            for update in updates:
+                translation = stored.get(update.start_segment_id)
+                if translation is None:
+                    raise RecordingServiceError(
+                        "translation_not_found",
+                        "A submitted translation does not belong to this recording.",
+                        status_code=422,
+                    )
+                current_ja = (
+                    _span_text(
+                        segments,
+                        sequence_of.get(translation.start_segment_id),
+                        sequence_of.get(translation.end_segment_id),
+                    )
+                    if translation.start_segment_id and translation.end_segment_id
+                    else None
+                )
+                if current_ja is None:
+                    raise RecordingServiceError(
+                        "translation_span_missing",
+                        "The transcript no longer contains the sentence this translation covers.",
+                        status_code=422,
+                    )
+                translation.text_zh_hk = update.text_zh_hk
+                # Clearing the stale flag without recording the words the person
+                # actually read would leave the row claiming to describe text it
+                # has never seen, and would break the match on a later
+                # re-transcription.
+                translation.source_ja = current_ja
+                translation.source = TranslationSource.MANUAL
+                translation.stale = False
+            recording.translation_revision += 1
+            session.flush()
+            return recording, sorted(stored.values(), key=lambda row: row.created_at)
+
     def reprocess_translation(self, recording_id: uuid.UUID) -> ProcessingJob:
         return self._enqueue_processing(
             recording_id,
@@ -1126,6 +1203,19 @@ def _safe_filename(filename: str) -> str:
     basename = PurePosixPath(normalized).name or PurePath(normalized).name
     cleaned = "".join(character for character in basename if character.isprintable())
     return cleaned[:255] or "audio"
+
+
+def _span_text(
+    segments: Sequence[TranscriptSegment], start: int | None, end: int | None
+) -> str | None:
+    """Join the transcript as it reads now across one translation's span."""
+
+    if start is None or end is None:
+        return None
+    covered = [
+        segment.text for segment in segments if start <= segment.sequence <= end
+    ]
+    return "".join(covered).strip() or None
 
 
 def _retention_date(now: datetime, days: int | None) -> datetime | None:

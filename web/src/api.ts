@@ -285,3 +285,18 @@ export function reprocessTranslation(recordingId: string): Promise<ProcessingReq
     { method: "POST", csrfToken: requireCsrfCookie() },
   );
 }
+
+export function updateTranslations(
+  recordingId: string,
+  expectedRevision: number,
+  translations: { start_segment_id: string; text_zh_hk: string }[],
+): Promise<TranscriptResponse> {
+  return request<TranscriptResponse>(
+    `/api/v1/recordings/${encodeURIComponent(recordingId)}/translations`,
+    {
+      method: "PUT",
+      body: { expected_revision: expectedRevision, translations },
+      csrfToken: requireCsrfCookie(),
+    },
+  );
+}

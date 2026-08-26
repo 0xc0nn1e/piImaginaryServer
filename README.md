@@ -469,6 +469,7 @@ must inspect and quarantine repeatedly rejected client items.
 | `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV/M4A browser upload. |
 | `PUT` | `/api/v1/recordings/{id}/checked` | Set or clear the administrator's review mark. Browser session or Bearer. |
 | `POST` | `/api/v1/recordings/{id}/translation/reprocess` | Queue a Cantonese translation of the committed transcript. |
+| `PUT` | `/api/v1/recordings/{id}/translations` | Save hand-written Cantonese for sentences that already have a translation. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/audio` | Session-protected original audio stream with HTTP byte-range support. |
@@ -683,8 +684,10 @@ carried across by matching the sentence text at the same moment in the audio,
 which is the one thing reprocessing does not change. A match is only made when
 the moment identifies exactly one sentence and that sentence identifies exactly
 one translation, so the outcome never depends on the order rows are read in.
-Losing a translation is visible and can be rewritten, while attaching it to the
-wrong line would not be.
+When it cannot be placed the rendering is kept
+detached and flagged rather than deleted: attaching it to the wrong line would
+be invisible, and deleting hand-written work nobody agreed to lose would be
+worse. A detached rendering is shown read-only until its words come back.
 
 `WORKER_JOB_KINDS` restricts which kinds a worker claims. A worker that omits
 `full` never loads Whisper or pyannote, so an analysis-only worker costs a

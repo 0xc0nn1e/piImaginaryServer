@@ -43,11 +43,15 @@ export function RecordingsPage() {
   const deviceId = searchParams.get("device_id") ?? "";
   const rawStatus = searchParams.get("status") ?? "";
   const status = validStatuses.has(rawStatus) ? (rawStatus as RecordingStatus) : "";
-  const rawChecked = searchParams.get("checked") ?? "";
-  const checked = rawChecked === "true" ? true : rawChecked === "false" ? false : undefined;
+  // Reviewing is the point of the list, so it opens on what still needs it.
+  // "all" has to be explicit because an absent parameter now means unchecked.
+  const rawChecked = searchParams.get("checked");
+  const checkedFilter =
+    rawChecked === "all" ? "all" : rawChecked === "true" ? "true" : "false";
+  const checked = checkedFilter === "all" ? undefined : checkedFilter === "true";
   const [deviceInput, setDeviceInput] = useState(deviceId);
   const [statusInput, setStatusInput] = useState<RecordingStatus | "">(status);
-  const [checkedInput, setCheckedInput] = useState(rawChecked);
+  const [checkedInput, setCheckedInput] = useState(checkedFilter);
   const [checkPending, setCheckPending] = useState<ReadonlySet<string>>(() => new Set());
   const [data, setData] = useState<RecordingListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -201,7 +205,7 @@ export function RecordingsPage() {
     const next = new URLSearchParams();
     if (deviceInput.trim()) next.set("device_id", deviceInput.trim());
     if (statusInput) next.set("status", statusInput);
-    if (checkedInput) next.set("checked", checkedInput);
+    if (checkedInput !== "false") next.set("checked", checkedInput);
     setSearchParams(next);
   }
 
@@ -407,9 +411,9 @@ export function RecordingsPage() {
             value={checkedInput}
             onChange={(event) => setCheckedInput(event.target.value)}
           >
-            <option value="">{t("recordings.checkedAll")}</option>
-            <option value="true">{t("recordings.checkedOnly")}</option>
             <option value="false">{t("recordings.uncheckedOnly")}</option>
+            <option value="true">{t("recordings.checkedOnly")}</option>
+            <option value="all">{t("recordings.checkedAll")}</option>
           </select>
         </label>
         <button className="button button-secondary" type="submit">
@@ -427,7 +431,7 @@ export function RecordingsPage() {
         <div className="empty-state">
           <span className="empty-wave" aria-hidden="true" />
           <h2>{t("recordings.emptyTitle")}</h2>
-          <p>{deviceId || status || checked !== undefined ? t("recordings.emptyFiltered") : t("recordings.emptyDefault")}</p>
+          <p>{deviceId || status || checkedFilter !== "false" ? t("recordings.emptyFiltered") : t("recordings.allChecked")}</p>
         </div>
       ) : null}
       {!loading && data && data.items.length > 0 ? (

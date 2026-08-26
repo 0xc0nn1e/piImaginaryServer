@@ -138,8 +138,8 @@ export type TranslationSource = "llm" | "manual";
 
 export interface TranscriptTranslation {
   id: string;
-  start_segment_id: string;
-  end_segment_id: string;
+  start_segment_id: string | null;
+  end_segment_id: string | null;
   source_ja: string;
   text_zh_hk: string;
   source: TranslationSource;

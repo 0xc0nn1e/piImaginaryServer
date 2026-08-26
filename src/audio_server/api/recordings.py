@@ -30,6 +30,7 @@ from audio_server.api.schemas import (
     TranscriptSegmentResponse,
     TranscriptTranslationResponse,
     TranscriptUpdateRequest,
+    TranslationUpdateRequest,
     UploadRecordingResponse,
 )
 from audio_server.core.furigana import annotate_all
@@ -219,6 +220,21 @@ def reprocess_analysis(
 ) -> RetryResponse:
     job = service.reprocess_analysis(recording_id)
     return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.put("/{recording_id}/translations", response_model=TranscriptResponse)
+def update_translations(
+    recording_id: uuid.UUID,
+    payload: TranslationUpdateRequest,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> TranscriptResponse:
+    service.update_translations(
+        recording_id,
+        expected_revision=payload.expected_revision,
+        updates=payload.translations,
+    )
+    return get_transcript(recording_id, service)
 
 
 @router.post(

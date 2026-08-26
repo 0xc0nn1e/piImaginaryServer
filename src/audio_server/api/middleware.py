@@ -280,6 +280,7 @@ def _is_browser_recording_mutation(scope: Scope) -> bool:
         return True
     if scope.get("method") == "PUT" and len(parts) == 6 and parts[-1] in {
         "transcript",
+        "translations",
         "analysis",
         "checked",
     }:

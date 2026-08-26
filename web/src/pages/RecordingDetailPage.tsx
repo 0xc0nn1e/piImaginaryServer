@@ -19,6 +19,7 @@ import {
   updateAnalysis,
   updateTranscript,
   reprocessTranslation,
+  updateTranslations,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { Furigana } from "../components/Furigana";
@@ -45,7 +46,7 @@ import type {
   TranscriptResponse,
 } from "../types";
 
-type DetailTab = "overview" | "activity" | "transcript" | "analysis";
+type DetailTab = "overview" | "activity" | "transcript" | "translations" | "analysis";
 type TranscriptState =
   | { kind: "idle" | "loading" | "pending" }
   | { kind: "ready"; data: TranscriptResponse }
@@ -54,7 +55,14 @@ type AnalysisState =
   | { kind: "idle" | "loading" | "pending" }
   | { kind: "ready"; data: AnalysisResponse }
   | { kind: "error"; message: string };
-type Mutation = "reprocess" | "reanalyse" | "translation" | "delete" | "transcript" | "analysis";
+type Mutation =
+  | "reprocess"
+  | "reanalyse"
+  | "translation"
+  | "translations"
+  | "delete"
+  | "transcript"
+  | "analysis";
 
 const terminalStatuses = new Set(["completed", "failed"]);
 const failureEvents = new Set(["processing_failed"]);
@@ -83,6 +91,12 @@ export function RecordingDetailPage() {
   const [analysis, setAnalysis] = useState<AnalysisState>({ kind: "idle" });
   const [transcriptDraft, setTranscriptDraft] = useState<TranscriptResponse | null>(null);
   const [transcriptRefreshKey, setTranscriptRefreshKey] = useState(0);
+  // The revision is captured when editing starts, not when saving. Polling can
+  // replace the transcript mid-edit, and reading it late would let this write
+  // silently overwrite a translation the editor never saw.
+  const [translationDraft, setTranslationDraft] = useState<
+    { revision: number; values: Record<string, string> } | null
+  >(null);
   const wasTranslating = useRef(false);
 
   // Analysis and translation both keep running after a recording is otherwise
@@ -305,7 +319,7 @@ export function RecordingDetailPage() {
   }, [translationJobActive]);
 
   useEffect(() => {
-    if (tab !== "transcript") return;
+    if (tab !== "transcript" && tab !== "translations") return;
     let cancelled = false;
     setTranscript({ kind: "loading" });
     void getTranscript(id)
@@ -377,6 +391,36 @@ export function RecordingDetailPage() {
       setMutationMessage(t("detail.reprocessQueued"));
     } catch (caught: unknown) {
       handleMutationError(caught, t("detail.reprocessError"));
+    } finally {
+      setMutationPending(null);
+    }
+  }
+
+  async function saveTranslations() {
+    if (!translationDraft || !shownTranscript) return;
+    const edited = shownTranscript.translations
+      .filter(
+        (item) =>
+          item.start_segment_id !== null &&
+          (translationDraft.values[item.id] ?? item.text_zh_hk) !== item.text_zh_hk,
+      )
+      .map((item) => ({
+        start_segment_id: item.start_segment_id as string,
+        text_zh_hk: translationDraft.values[item.id] ?? item.text_zh_hk,
+      }));
+    if (!edited.length) {
+      setTranslationDraft(null);
+      return;
+    }
+    setMutationPending("translations");
+    setMutationMessage(null);
+    try {
+      const saved = await updateTranslations(id, translationDraft.revision, edited);
+      setTranscript({ kind: "ready", data: saved });
+      setTranslationDraft(null);
+      setMutationMessage(t("detail.translationsSaved"));
+    } catch (caught: unknown) {
+      handleMutationError(caught, t("detail.translationsSaveError"));
     } finally {
       setMutationPending(null);
     }
@@ -555,6 +599,7 @@ export function RecordingDetailPage() {
           ["overview", t("detail.tabOverview")],
           ["activity", t("detail.tabActivity")],
           ["transcript", t("detail.tabTranscript")],
+          ["translations", t("detail.tabTranslations")],
           ["analysis", t("detail.tabAnalysis")],
         ] as const).map(([value, label]) => (
           <button
@@ -657,6 +702,56 @@ export function RecordingDetailPage() {
         </section>
       ) : null}
 
+      {tab === "translations" ? (
+        <section aria-labelledby="tab-translations" className="tab-panel panel" id="panel-translations" role="tabpanel">
+          <div className="panel-heading-row">
+            <div><p className="panel-kicker">{t("detail.translationsKicker")}</p><h2>{t("detail.tabTranslations")}</h2></div>
+            {shownTranscript?.translations.length ? <div className="inline-actions">
+              {translationDraft ? <>
+                <button className="button" disabled={mutationPending !== null} type="button" onClick={() => void saveTranslations()}>{mutationPending === "translations" ? t("detail.saving") : t("detail.save")}</button>
+                <button className="button button-secondary" type="button" onClick={() => setTranslationDraft(null)}>{t("detail.cancel")}</button>
+              </> : <button className="button button-secondary" type="button" onClick={() => setTranslationDraft({ revision: shownTranscript.translation_revision, values: {} })}>{t("detail.edit")}</button>}
+            </div> : null}
+          </div>
+          {transcript.kind === "loading" || transcript.kind === "idle" ? <LoadingView label={t("detail.transcriptLoading")} /> : null}
+          {transcript.kind === "error" ? <div className="notice notice-error" role="alert">{transcript.message}</div> : null}
+          {shownTranscript && shownTranscript.translations.length === 0 && transcript.kind === "ready" ? <div className="empty-state compact-empty"><h3>{t("detail.noTranslations")}</h3><p>{t("detail.noTranslationsDescription")}</p></div> : null}
+          {shownTranscript?.translations.length ? (
+            <ol className="translation-list">
+              {shownTranscript.translations.map((item) => (
+                <li key={item.id}>
+                  <p className="translation-source"><Furigana text={spanText(shownTranscript, item) ?? item.source_ja} readings={transcriptReadings} /></p>
+                  {item.start_segment_id === null ? <small className="translation-detached">{t("detail.translationDetached")}</small> : null}
+                  {translationDraft && item.start_segment_id !== null ? (
+                    <textarea
+                      aria-label={t("detail.translationField")}
+                      rows={2}
+                      value={translationDraft.values[item.id] ?? item.text_zh_hk}
+                      onChange={(event) =>
+                        setTranslationDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                values: { ...current.values, [item.id]: event.target.value },
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                  ) : (
+                    <p className={item.stale ? "segment-translation is-stale" : "segment-translation"}>
+                      {item.text_zh_hk}
+                      {item.stale ? <small>{t("detail.translationStale")}</small> : null}
+                    </p>
+                  )}
+                  <small className="translation-origin">{t(item.source === "manual" ? "detail.translationManual" : "detail.translationMachine")}</small>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </section>
+      ) : null}
+
       {tab === "analysis" ? (
         <section aria-labelledby="tab-analysis" className="tab-panel analysis-stack" id="panel-analysis" role="tabpanel">
           <div className="panel analysis-toolbar">
@@ -735,4 +830,19 @@ function renderTranslation(
       {translation.stale ? <small>{t("detail.translationStale")}</small> : null}
     </p>
   );
+}
+
+
+function spanText(
+  transcript: TranscriptResponse,
+  translation: TranscriptTranslation,
+): string | null {
+  // A stale row still carries the Japanese it was written for. Editing has to
+  // happen against what the transcript says now, or the words on screen are not
+  // the words being translated.
+  if (translation.start_segment_id === null || translation.end_segment_id === null) return null;
+  const start = transcript.segments.findIndex((item) => item.id === translation.start_segment_id);
+  const end = transcript.segments.findIndex((item) => item.id === translation.end_segment_id);
+  if (start === -1 || end === -1 || end < start) return null;
+  return transcript.segments.slice(start, end + 1).map((item) => item.text).join("");
 }

@@ -47,6 +47,33 @@ afterEach(() => {
 });
 
 describe("review marks on the recordings list", () => {
+  it("opens on the recordings that still need review", async () => {
+    window.history.replaceState({}, "", "/recordings");
+    const queries: string[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-27T08:00:00Z" });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        queries.push(new URL(path, "http://localhost").searchParams.get("checked") ?? "");
+        return jsonResponse({ items: [recording(0)], limit: PAGE_SIZE, offset: 0 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    // No parameter in the URL still means "not checked yet", so the list is a
+    // queue of outstanding work rather than everything ever recorded.
+    await waitFor(() => expect(queries).toEqual(["false"]));
+    expect(await screen.findByDisplayValue("只看未檢查")).toBeInTheDocument();
+  });
+
   it("keeps a row visible after it stops matching the filter and pulls the next offset back", async () => {
     document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
     window.history.replaceState({}, "", "/recordings?checked=false");

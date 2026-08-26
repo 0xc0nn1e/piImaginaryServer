@@ -277,7 +277,7 @@ def _unique_match(
 
 def _capture_manual_translations(
     session: Session, recording_id: uuid.UUID
-) -> list[tuple[str, float, str]]:
+) -> list[tuple[str, float | None, str]]:
     """Record each hand-written rendering as (sentence, when it was said, text).
 
     Re-transcription replaces segment ids and renumbers sequences, and it also
@@ -311,16 +311,18 @@ def _capture_manual_translations(
             )
         )
     }
-    captured: list[tuple[str, float, str]] = []
+    captured: list[tuple[str, float | None, str]] = []
     for row in rows:
+        if row.start_segment_id is None:
+            # Already detached by an earlier pass. It has no moment to match on,
+            # so it is carried through untouched rather than dropped, which is
+            # what skipping it here would silently do.
+            captured.append((row.source_ja, None, row.text_zh_hk))
+            continue
         sequence = sequence_of_segment.get(row.start_segment_id)
-        if sequence is None:
-            continue
-        start_time = start_time_of_sentence.get(sequence)
-        if start_time is None:
-            # The row no longer starts a sentence, so the moment it described
-            # cannot be established; guessing would misplace the words.
-            continue
+        start_time = start_time_of_sentence.get(sequence) if sequence is not None else None
+        # A row that no longer starts a sentence has no establishable moment, so
+        # it travels as detached rather than being matched by guesswork.
         captured.append((row.source_ja, start_time, row.text_zh_hk))
     return captured
 
@@ -351,7 +353,7 @@ def _carry_manual_translations(
     session: Session,
     recording_id: uuid.UUID,
     transcript: Sequence[MergedTranscriptSegment],
-    preserved: Sequence[tuple[str, float, str]],
+    preserved: Sequence[tuple[str, float | None, str]],
 ) -> None:
     """Re-attach hand-written translations to a freshly written transcript.
 
@@ -381,30 +383,35 @@ def _carry_manual_translations(
         candidates[sentence.text].append(sentence)
     written_at: dict[str, list[float]] = defaultdict(list)
     for source_ja, start_time, _text in preserved:
-        written_at[source_ja].append(start_time)
+        if start_time is not None:
+            written_at[source_ja].append(start_time)
     for source_ja, start_time, text_zh_hk in preserved:
-        match = _unique_match(candidates.get(source_ja, []), start_time)
-        if match is None:
-            continue
-        sentence = match
+        match = (
+            _unique_match(candidates.get(source_ja, []), start_time)
+            if start_time is not None
+            else None
+        )
         # The sentence has to point back at exactly this one rendering too. If a
         # new pass merges two lines the administrator translated separately,
         # both renderings see a single candidate and whichever row happened to
         # be read first would claim it.
-        if _count_within(written_at[source_ja], sentence.start_time) != 1:
-            continue
-        start_id = by_sequence.get(sentence.start_sequence)
-        end_id = by_sequence.get(sentence.end_sequence)
-        if start_id is None or end_id is None:
-            continue
+        if match is not None and _count_within(written_at[source_ja], match.start_time) != 1:
+            match = None
+        start_id = by_sequence.get(match.start_sequence) if match else None
+        end_id = by_sequence.get(match.end_sequence) if match else None
+        attached = start_id is not None and end_id is not None
         session.add(
             TranscriptTranslation(
                 recording_id=recording_id,
-                start_segment_id=start_id,
-                end_segment_id=end_id,
+                start_segment_id=start_id if attached else None,
+                end_segment_id=end_id if attached else None,
                 source_ja=source_ja,
                 text_zh_hk=text_zh_hk,
                 source=TranslationSource.MANUAL,
+                # A rendering that could not be placed is kept detached and
+                # flagged. Dropping it would delete writing silently, which is
+                # the one outcome the administrator cannot notice or undo.
+                stale=not attached,
             )
         )
 
@@ -431,7 +438,7 @@ def _write_translations(
         )
     }
     existing = {
-        row.start_segment_id: row
+        row.start_segment_id: row  # detached rows have no key and are left alone
         for row in session.scalars(
             select(TranscriptTranslation)
             .where(TranscriptTranslation.recording_id == recording_id)

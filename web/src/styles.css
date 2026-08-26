@@ -2545,3 +2545,46 @@ blockquote:has(ruby),
   color: var(--muted);
   font-size: 0.7rem;
 }
+
+.translation-list {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.translation-list li {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.translation-source {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.95rem;
+  line-height: 1.9;
+}
+
+.translation-list textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.translation-list .segment-translation {
+  margin: 0;
+}
+
+.translation-origin {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.translation-detached {
+  color: rgb(255 190 90 / 90%);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}

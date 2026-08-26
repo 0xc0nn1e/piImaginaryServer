@@ -619,3 +619,166 @@ describe("Cantonese translations under the transcript", () => {
     expect(await screen.findByText("去咗。", undefined, { timeout: 8000 })).toBeInTheDocument();
   }, 12000);
 });
+
+describe("editing a Cantonese translation by hand", () => {
+  it("sends only the edited sentence and shows it as manual afterwards", async () => {
+    const machine = {
+      id: "translation-1",
+      start_segment_id: "segment-1",
+      end_segment_id: "segment-1",
+      source_ja: "行きました。",
+      text_zh_hk: "機器譯文",
+      source: "llm",
+      stale: true,
+    };
+    const untouched = {
+      id: "translation-2",
+      start_segment_id: "segment-2",
+      end_segment_id: "segment-2",
+      source_ja: "はい。",
+      text_zh_hk: "係。",
+      source: "llm",
+      stale: true,
+    };
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [machine, untouched],
+      translation_revision: 3,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let sent: unknown = null;
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/translations") && init?.method === "PUT") {
+        sent = JSON.parse(String(init.body));
+        return Promise.resolve(
+          jsonResponse({
+            ...transcript,
+            translation_revision: 4,
+            translations: [
+              { ...machine, text_zh_hk: "人手譯文", source: "manual", stale: false },
+              untouched,
+            ],
+          }),
+        );
+      }
+      if (path.endsWith("/transcript")) return Promise.resolve(jsonResponse(transcript));
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+    await screen.findByText("機器譯文");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    const field = screen.getAllByRole("textbox", { name: "廣東話譯文" })[0];
+    await browser.clear(field);
+    await browser.type(field, "人手譯文");
+    await browser.click(screen.getByRole("button", { name: "儲存" }));
+
+    await waitFor(() => expect(sent).not.toBeNull());
+    // The revision is the one that was on screen when editing started, so a
+    // translation that arrived mid-edit cannot be overwritten unnoticed.
+    expect(sent).toEqual({
+      expected_revision: 3,
+      translations: [{ start_segment_id: "segment-1", text_zh_hk: "人手譯文" }],
+    });
+    expect(await screen.findByText("人手譯文")).toBeInTheDocument();
+    expect(screen.getAllByText("手動")).toHaveLength(1);
+  });
+});
+
+describe("guarding a translation edit against concurrent writes", () => {
+  it("saves against the revision that was on screen when editing began", async () => {
+    const row = {
+      id: "translation-1",
+      start_segment_id: "segment-1",
+      end_segment_id: "segment-1",
+      source_ja: "行きました。",
+      text_zh_hk: "機器譯文",
+      source: "llm",
+      stale: false,
+    };
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [row],
+      translation_revision: 3,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let revision = 3;
+    const captured: { expected_revision?: number }[] = [];
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/translations") && init?.method === "PUT") {
+        captured.push(JSON.parse(String(init.body)));
+        return Promise.resolve(jsonResponse(transcript));
+      }
+      if (path.endsWith("/transcript")) {
+        return Promise.resolve(jsonResponse({ ...transcript, translation_revision: revision }));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+    await screen.findByText("機器譯文");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    // A translation job lands while the editor is open.
+    revision = 9;
+
+    const field = screen.getAllByRole("textbox", { name: "廣東話譯文" })[0];
+    await browser.clear(field);
+    await browser.type(field, "人手譯文");
+    await browser.click(screen.getByRole("button", { name: "儲存" }));
+
+    await waitFor(() => expect(captured).toHaveLength(1));
+    // Reading the revision at save time would send 9 and quietly overwrite work
+    // the editor never saw. The server must be given the chance to refuse.
+    expect(captured[0].expected_revision).toBe(3);
+  });
+});

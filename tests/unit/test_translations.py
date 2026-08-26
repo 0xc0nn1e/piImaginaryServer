@@ -30,7 +30,7 @@ from audio_server.processing.contracts import (
     TranslationResult,
 )
 from audio_server.worker_runtime import _result_persister, _write_translations
-from tests.conftest import TEST_API_TOKEN
+from tests.conftest import TEST_API_TOKEN, TEST_WEB_SETUP_TOKEN
 
 BEARER = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
 
@@ -318,7 +318,7 @@ def test_reprocessing_keeps_a_hand_written_translation_whose_sentence_survived(
     assert rows[0].start_segment_id == segments[0].id
 
 
-def test_reprocessing_drops_a_translation_whose_sentence_changed(
+def test_reprocessing_detaches_a_translation_whose_sentence_changed(
     session_factory: sessionmaker[Session],
 ) -> None:
     recording_id, segment_ids = _seed(session_factory, ["行きました。"])
@@ -338,9 +338,11 @@ def test_reprocessing_drops_a_translation_whose_sentence_changed(
 
     with session_factory() as session:
         rows = list(session.scalars(select_translations(recording_id)))
-    # The words it was written for are gone; reattaching it would put a
-    # translation under a sentence it never described.
-    assert rows == []
+    # The words it was written for are gone, so it is not reattached -- but it
+    # is written by hand, so it is kept where its author can still see it.
+    assert [row.text_zh_hk for row in rows] == ["人手譯文"]
+    assert rows[0].start_segment_id is None
+    assert rows[0].stale is True
 
 
 def test_repeated_sentences_are_restored_by_position_not_by_text(
@@ -464,7 +466,7 @@ def test_an_extra_line_recognised_on_reprocess_does_not_shift_a_translation(
     assert rows[0].start_segment_id == segments[3].id
 
 
-def test_a_sentence_that_moved_far_in_time_is_not_reattached(
+def test_a_sentence_that_moved_far_in_time_is_detached_not_deleted(
     session_factory: sessionmaker[Session],
 ) -> None:
     recording_id, segment_ids = _seed(session_factory, ["はい。"])
@@ -488,7 +490,8 @@ def test_a_sentence_that_moved_far_in_time_is_not_reattached(
         rows = list(session.scalars(select_translations(recording_id)))
 
     # The same words now appear seconds away, so this is a different moment.
-    assert rows == []
+    assert [row.text_zh_hk for row in rows] == ["係。"]
+    assert rows[0].start_segment_id is None
 
 
 def test_two_identical_lines_at_the_same_moment_are_not_guessed_between(
@@ -516,7 +519,8 @@ def test_two_identical_lines_at_the_same_moment_are_not_guessed_between(
 
     # Nothing here says which line the administrator wrote for. Picking the
     # nearer one would let read order decide, and the mistake would be silent.
-    assert rows == []
+    assert [row.text_zh_hk for row in rows] == ["係。"]
+    assert rows[0].start_segment_id is None
 
 
 def test_two_hand_translations_merged_into_one_line_are_both_left_out(
@@ -544,5 +548,186 @@ def test_two_hand_translations_merged_into_one_line_are_both_left_out(
         rows = list(session.scalars(select_translations(recording_id)))
 
     # Only one can be attached, and nothing says which. Taking whichever row was
-    # read first would decide it by accident.
-    assert rows == []
+    # read first would decide it by accident, so both stay detached.
+    assert sorted(row.text_zh_hk for row in rows) == sorted(["係。", "冇錯。"])
+    assert all(row.start_segment_id is None for row in rows)
+
+
+def _login(client: TestClient) -> dict[str, str]:
+    setup = client.post(
+        "/api/v1/auth/setup",
+        headers={"Origin": "http://testserver", "X-Setup-Token": TEST_WEB_SETUP_TOKEN},
+        json={"username": "admin", "password": "a synthetic admin password"},
+    )
+    assert setup.status_code == 201
+    login = client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "http://testserver"},
+        json={"username": "admin", "password": "a synthetic admin password"},
+    )
+    assert login.status_code == 200
+    token = client.cookies.get("audio_server_csrf")
+    assert token
+    return {"Origin": "http://testserver", "X-CSRF-Token": token}
+
+
+def test_a_hand_written_translation_replaces_the_machine_one(
+    app_client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    recording_id, segment_ids = _seed(session_factory, ["行きました。"])
+    with session_factory.begin() as session:
+        _write_translations(
+            session, recording_id, _result((0, 0, "行きました。", "機器譯文"))
+        )
+    headers = _login(app_client)
+
+    saved = app_client.put(
+        f"/api/v1/recordings/{recording_id}/translations",
+        headers=headers,
+        json={
+            "expected_revision": 0,
+            "translations": [
+                {"start_segment_id": str(segment_ids[0]), "text_zh_hk": "  人手譯文  "}
+            ],
+        },
+    )
+
+    assert saved.status_code == 200
+    body = saved.json()["translations"]
+    assert [item["text_zh_hk"] for item in body] == ["人手譯文"]
+    assert body[0]["source"] == "manual"
+    assert body[0]["stale"] is False
+    assert saved.json()["translation_revision"] == 1
+
+
+def test_saving_a_translation_against_a_stale_revision_conflicts(
+    app_client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    recording_id, segment_ids = _seed(session_factory, ["行きました。"])
+    with session_factory.begin() as session:
+        _write_translations(session, recording_id, _result((0, 0, "行きました。", "機器譯文")))
+    headers = _login(app_client)
+    payload = {
+        "expected_revision": 7,
+        "translations": [{"start_segment_id": str(segment_ids[0]), "text_zh_hk": "人手譯文"}],
+    }
+
+    response = app_client.put(
+        f"/api/v1/recordings/{recording_id}/translations", headers=headers, json=payload
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "translation_revision_conflict"
+
+
+def test_a_translation_from_another_recording_is_rejected(
+    app_client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    recording_id, _ = _seed(session_factory, ["行きました。"])
+    other_id, other_segments = _seed(session_factory, ["はい。"])
+    with session_factory.begin() as session:
+        _write_translations(session, other_id, _result((0, 0, "はい。", "係。")))
+    headers = _login(app_client)
+
+    response = app_client.put(
+        f"/api/v1/recordings/{recording_id}/translations",
+        headers=headers,
+        json={
+            "expected_revision": 0,
+            "translations": [
+                {"start_segment_id": str(other_segments[0]), "text_zh_hk": "唔屬於呢單"}
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "translation_not_found"
+
+
+def test_saving_by_hand_records_the_words_that_were_actually_read(
+    app_client: TestClient, session_factory: sessionmaker[Session]
+) -> None:
+    recording_id, segment_ids = _seed(session_factory, ["昨日は", "行きました。"])
+    with session_factory.begin() as session:
+        _write_translations(
+            session, recording_id, _result((0, 1, "昨日は行きました。", "尋日去咗。"))
+        )
+    headers = _login(app_client)
+
+    # The transcript is corrected, which makes every translation stale.
+    transcript = app_client.get(f"/api/v1/recordings/{recording_id}/transcript", headers=headers)
+    edited = app_client.put(
+        f"/api/v1/recordings/{recording_id}/transcript",
+        headers=headers,
+        json={
+            "expected_revision": transcript.json()["revision"],
+            "segments": [
+                {
+                    "id": str(segment_ids[0]),
+                    "speaker_label": "SPEAKER_00",
+                    "start_time": 0.0,
+                    "end_time": 0.9,
+                    "text": "一昨日は",
+                },
+                {
+                    "id": str(segment_ids[1]),
+                    "speaker_label": "SPEAKER_00",
+                    "start_time": 1.0,
+                    "end_time": 1.9,
+                    "text": "行きました。",
+                },
+            ],
+        },
+    )
+    assert edited.status_code == 200
+    assert edited.json()["translations"][0]["stale"] is True
+
+    saved = app_client.put(
+        f"/api/v1/recordings/{recording_id}/translations",
+        headers=headers,
+        json={
+            "expected_revision": edited.json()["translation_revision"],
+            "translations": [
+                {"start_segment_id": str(segment_ids[0]), "text_zh_hk": "前日去咗。"}
+            ],
+        },
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["translations"][0]["stale"] is False
+    with session_factory() as session:
+        row = session.scalars(select_translations(recording_id)).one()
+    # Clearing the flag without this would leave the row claiming to describe
+    # text it was never written for, and a later reprocess could not match it.
+    assert row.source_ja == "一昨日は行きました。"
+
+
+def test_a_detached_translation_survives_further_reprocessing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id, segment_ids = _seed(session_factory, ["行きました。"])
+    with session_factory.begin() as session:
+        session.add(
+            TranscriptTranslation(
+                recording_id=recording_id,
+                start_segment_id=segment_ids[0],
+                end_segment_id=segment_ids[0],
+                source_ja="行きました。",
+                text_zh_hk="人手譯文",
+                source=TranslationSource.MANUAL,
+            )
+        )
+
+    # The first pass detaches it: the sentence it described is gone.
+    _reprocess(session_factory, recording_id, ["帰りました。"])
+    with session_factory() as session:
+        detached = session.scalars(select_translations(recording_id)).one()
+        assert detached.start_segment_id is None
+
+    # A second pass must not quietly finish the job the first one started.
+    _reprocess(session_factory, recording_id, ["おはよう。"])
+
+    with session_factory() as session:
+        rows = list(session.scalars(select_translations(recording_id)))
+    assert [row.text_zh_hk for row in rows] == ["人手譯文"]
+    assert rows[0].start_segment_id is None

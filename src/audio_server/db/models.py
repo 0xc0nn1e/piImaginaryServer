@@ -300,11 +300,13 @@ class TranscriptTranslation(Base):
     recording_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False
     )
-    start_segment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("transcript_segments.id", ondelete="CASCADE"), nullable=False
+    # Null once the sentence this rendering described is gone. The writing is
+    # kept and shown rather than deleted, because nobody agreed to lose it.
+    start_segment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("transcript_segments.id", ondelete="CASCADE")
     )
-    end_segment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("transcript_segments.id", ondelete="CASCADE"), nullable=False
+    end_segment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("transcript_segments.id", ondelete="CASCADE")
     )
     # The Japanese this rendering was made from. A re-transcription replaces
     # every segment, and this snapshot is the only way to recognise a sentence
