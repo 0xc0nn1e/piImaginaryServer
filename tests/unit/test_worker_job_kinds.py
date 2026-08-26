@@ -18,7 +18,7 @@ from audio_server.db.models import JobKind, JobStatus, ProcessingJob, Recording,
 from audio_server.jobs.queue import JobQueue, RetryPolicy
 from audio_server.processing.errors import PermanentProcessingError
 from audio_server.worker_runtime import PipelineJobProcessor, _parse_job_kinds
-from tests.conftest import TEST_API_TOKEN
+from tests.conftest import TEST_API_TOKEN, TEST_WEB_SETUP_TOKEN
 
 
 def _queue(session_factory: sessionmaker[Session]) -> JobQueue:
@@ -205,3 +205,25 @@ def test_queue_counts_report_the_whole_backlog_not_the_page(
     assert len(body["items"]) == 2
     assert body["queued"] == 5
     assert body["processing"] == 0
+
+
+def test_a_browser_session_can_read_the_queue_without_a_bearer_token(
+    app_client: TestClient,
+) -> None:
+    setup = app_client.post(
+        "/api/v1/auth/setup",
+        headers={"Origin": "http://testserver", "X-Setup-Token": TEST_WEB_SETUP_TOKEN},
+        json={"username": "admin", "password": "a synthetic admin password"},
+    )
+    assert setup.status_code == 201
+    login = app_client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "http://testserver"},
+        json={"username": "admin", "password": "a synthetic admin password"},
+    )
+    assert login.status_code == 200
+
+    response = app_client.get("/api/v1/queue")
+
+    # A 401 here logs the administrator out of the whole application.
+    assert response.status_code == 200

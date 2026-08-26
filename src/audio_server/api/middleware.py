@@ -265,7 +265,9 @@ def _is_bookmark_path(scope: Scope) -> bool:
 def _is_browser_read(scope: Scope) -> bool:
     path = str(scope.get("path", "")).rstrip("/")
     return scope.get("method") in {"GET", "HEAD"} and (
-        path == "/api/v1/recordings" or path.startswith("/api/v1/recordings/")
+        path == "/api/v1/recordings"
+        or path.startswith("/api/v1/recordings/")
+        or path == "/api/v1/queue"
     )
 
 
