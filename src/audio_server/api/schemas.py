@@ -111,8 +111,15 @@ class RecordingSummary(BaseModel):
     sample_rate: int | None
     channels: int | None
     processing_status: RecordingStatus
+    checked: bool
     created_at: datetime
     updated_at: datetime
+
+
+class RecordingCheckedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checked: bool
 
 
 class RecordingListResponse(BaseModel):

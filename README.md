@@ -467,6 +467,7 @@ must inspect and quarantine repeatedly rejected client items.
 | `POST` | `/api/v1/auth/logout` | Revoke the current session with CSRF validation. |
 | `POST` | `/api/v1/recordings` | Validate, durably store, enqueue, and return immediately. |
 | `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV/M4A browser upload. |
+| `PUT` | `/api/v1/recordings/{id}/checked` | Set or clear the administrator's review mark. Browser session or Bearer. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/audio` | Session-protected original audio stream with HTTP byte-range support. |

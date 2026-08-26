@@ -2472,3 +2472,33 @@ blockquote:has(ruby),
   font-size: 0.85rem;
   margin: 18px 0 8px;
 }
+
+.checked-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checked-toggle input {
+  accent-color: rgb(189 124 255);
+  cursor: pointer;
+}
+
+.checked-toggle input:disabled {
+  cursor: progress;
+}
+
+.recording-card.is-filtered-out {
+  opacity: 0.55;
+}
+
+.filtered-out-note {
+  color: var(--muted);
+  font-size: 0.7rem;
+  flex-basis: 100%;
+}

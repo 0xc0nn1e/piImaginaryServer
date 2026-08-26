@@ -279,6 +279,7 @@ def _is_browser_recording_mutation(scope: Scope) -> bool:
     if scope.get("method") == "PUT" and len(parts) == 6 and parts[-1] in {
         "transcript",
         "analysis",
+        "checked",
     }:
         return True
     if scope.get("method") == "POST" and len(parts) == 6 and parts[-1] == "reprocess":

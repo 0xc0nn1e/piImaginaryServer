@@ -255,16 +255,35 @@ class RecordingService:
         offset: int,
         device_id: str | None,
         status: RecordingStatus | None,
+        checked: bool | None = None,
     ) -> list[Recording]:
         statement: Select[tuple[Recording]] = select(Recording)
         if device_id is not None:
             statement = statement.where(Recording.device_id == device_id)
         if status is not None:
             statement = statement.where(Recording.processing_status == status)
+        if checked is not None:
+            statement = statement.where(Recording.checked == checked)
         statement = statement.order_by(Recording.created_at.desc(), Recording.id.desc())
         statement = statement.limit(limit).offset(offset)
         with self._session_factory() as session:
             return list(session.scalars(statement))
+
+    def set_checked(self, recording_id: uuid.UUID, *, checked: bool) -> Recording:
+        """Mark a recording as reviewed by the administrator, or clear that mark."""
+
+        with self._session_factory.begin() as session:
+            recording = session.get(Recording, recording_id, with_for_update=True)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            recording.checked = checked
+            session.flush()
+            # updated_at is refreshed by the database, and the factory keeps
+            # values readable after the block commits.
+            session.refresh(recording)
+            return recording
 
     def get_recording(self, recording_id: uuid.UUID) -> Recording:
         with self._session_factory() as session:

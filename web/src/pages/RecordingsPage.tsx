@@ -1,7 +1,13 @@
 import { type DragEvent, type FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
-import { ApiError, listRecordings, uploadWebRecording } from "../api";
+import {
+  ApiError,
+  listRecordings,
+  readCsrfCookie,
+  setRecordingChecked,
+  uploadWebRecording,
+} from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { LoadingView } from "../components/LoadingView";
 import { StatusBadge } from "../components/StatusBadge";
@@ -37,8 +43,12 @@ export function RecordingsPage() {
   const deviceId = searchParams.get("device_id") ?? "";
   const rawStatus = searchParams.get("status") ?? "";
   const status = validStatuses.has(rawStatus) ? (rawStatus as RecordingStatus) : "";
+  const rawChecked = searchParams.get("checked") ?? "";
+  const checked = rawChecked === "true" ? true : rawChecked === "false" ? false : undefined;
   const [deviceInput, setDeviceInput] = useState(deviceId);
   const [statusInput, setStatusInput] = useState<RecordingStatus | "">(status);
+  const [checkedInput, setCheckedInput] = useState(rawChecked);
+  const [checkPending, setCheckPending] = useState<ReadonlySet<string>>(() => new Set());
   const [data, setData] = useState<RecordingListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +62,7 @@ export function RecordingsPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void listRecordings({ limit: PAGE_SIZE, offset, deviceId, status })
+    void listRecordings({ limit: PAGE_SIZE, offset, deviceId, status, checked })
       .then((result) => {
         if (!cancelled) setData(result);
       })
@@ -71,7 +81,7 @@ export function RecordingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [deviceId, invalidate, navigate, offset, refreshKey, status, t]);
+  }, [checked, deviceId, invalidate, navigate, offset, refreshKey, status, t]);
 
   function addFiles(files: FileList | File[]) {
     const candidates = Array.from(files);
@@ -89,6 +99,46 @@ export function RecordingsPage() {
       })),
     ]);
     if (accepted.length) setUploadOpen(true);
+  }
+
+  async function toggleChecked(recordingId: string, next: boolean) {
+    const csrfToken = readCsrfCookie();
+    if (!csrfToken) {
+      invalidate();
+      navigate("/login", { replace: true });
+      return;
+    }
+    setCheckPending((current) => new Set(current).add(recordingId));
+    try {
+      const saved = await setRecordingChecked(recordingId, next, csrfToken);
+      // The row stays put even when it stops matching the active filter.
+      // Offset pagination shifts every later row up when the matching set
+      // shrinks, so refetching this page would silently skip one recording;
+      // the row is marked instead, and the next load drops it honestly.
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === recordingId ? { ...item, checked: saved.checked } : item,
+              ),
+            }
+          : current,
+      );
+    } catch (caught: unknown) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        invalidate();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(t("recordings.checkedError"));
+    } finally {
+      setCheckPending((current) => {
+        const next = new Set(current);
+        next.delete(recordingId);
+        return next;
+      });
+    }
   }
 
   function handleDrop(event: DragEvent<HTMLElement>) {
@@ -151,6 +201,7 @@ export function RecordingsPage() {
     const next = new URLSearchParams();
     if (deviceInput.trim()) next.set("device_id", deviceInput.trim());
     if (statusInput) next.set("status", statusInput);
+    if (checkedInput) next.set("checked", checkedInput);
     setSearchParams(next);
   }
 
@@ -162,6 +213,13 @@ export function RecordingsPage() {
   }
 
   const pageItems = data?.items ?? [];
+  // Rows on this page that no longer match the active filter have already left
+  // the server's result set, shifting every later row up. Advancing by a full
+  // page would step over exactly that many recordings, so the next offset has
+  // to be pulled back by the same count. Only one administrator account can
+  // exist, so nothing else mutates the set underneath this page.
+  const driftedOut =
+    checked === undefined ? 0 : pageItems.filter((item) => item.checked !== checked).length;
   const activeCount = pageItems.filter((item) =>
     ["uploaded", "queued", "processing"].includes(item.processing_status),
   ).length;
@@ -342,6 +400,18 @@ export function RecordingsPage() {
             <option value="uploaded">{t(statusLabelKey("uploaded"))}</option>
           </select>
         </label>
+        <label>
+          {t("recordings.checked")}
+          <select
+            name="checked"
+            value={checkedInput}
+            onChange={(event) => setCheckedInput(event.target.value)}
+          >
+            <option value="">{t("recordings.checkedAll")}</option>
+            <option value="true">{t("recordings.checkedOnly")}</option>
+            <option value="false">{t("recordings.uncheckedOnly")}</option>
+          </select>
+        </label>
         <button className="button button-secondary" type="submit">
           {t("recordings.apply")}
         </button>
@@ -357,13 +427,20 @@ export function RecordingsPage() {
         <div className="empty-state">
           <span className="empty-wave" aria-hidden="true" />
           <h2>{t("recordings.emptyTitle")}</h2>
-          <p>{deviceId || status ? t("recordings.emptyFiltered") : t("recordings.emptyDefault")}</p>
+          <p>{deviceId || status || checked !== undefined ? t("recordings.emptyFiltered") : t("recordings.emptyDefault")}</p>
         </div>
       ) : null}
       {!loading && data && data.items.length > 0 ? (
         <div className="recording-grid" aria-live="polite">
           {data.items.map((recording, index) => (
-            <article className="recording-card" key={recording.id}>
+            <article
+              className={
+                checked !== undefined && recording.checked !== checked
+                  ? "recording-card is-filtered-out"
+                  : "recording-card"
+              }
+              key={recording.id}
+            >
               <div className="recording-index" aria-hidden="true">
                 {String(offset + index + 1).padStart(2, "0")}
               </div>
@@ -371,6 +448,18 @@ export function RecordingsPage() {
                 <div className="recording-card-top">
                   <StatusBadge status={recording.processing_status} />
                   <span>{formatDateTime(recording.started_at, locale)}</span>
+                  <label className="checked-toggle">
+                    <input
+                      type="checkbox"
+                      checked={recording.checked}
+                      disabled={checkPending.has(recording.id)}
+                      onChange={(event) => void toggleChecked(recording.id, event.target.checked)}
+                    />
+                    {t("recordings.checked")}
+                  </label>
+                  {checked !== undefined && recording.checked !== checked ? (
+                    <small className="filtered-out-note">{t("recordings.filteredOut")}</small>
+                  ) : null}
                 </div>
                 <h2>
                   <Link to={`/recordings/${recording.id}`}>{recording.original_filename}</Link>
@@ -411,11 +500,13 @@ export function RecordingsPage() {
             {t("recordings.previous")}
           </button>
           <span>{t("recordings.page", { page: Math.floor(offset / PAGE_SIZE) + 1 })}</span>
+          {/* An in-flight toggle is not yet counted in driftedOut, so advancing
+              now could step over the recording it is about to remove. */}
           <button
             className="button button-secondary"
-            disabled={data.items.length < PAGE_SIZE}
+            disabled={data.items.length < PAGE_SIZE || checkPending.size > 0}
             type="button"
-            onClick={() => goToOffset(offset + PAGE_SIZE)}
+            onClick={() => goToOffset(Math.max(0, offset + PAGE_SIZE - driftedOut))}
           >
             {t("recordings.next")}
           </button>

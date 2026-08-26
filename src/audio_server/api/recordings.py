@@ -21,6 +21,7 @@ from audio_server.api.schemas import (
     FuriganaToken,
     JobError,
     JobStatusResponse,
+    RecordingCheckedRequest,
     RecordingListResponse,
     RecordingStatusResponse,
     RecordingSummary,
@@ -89,9 +90,10 @@ def list_recordings(
     offset: Annotated[int, Query(ge=0)] = 0,
     device_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
     status: Annotated[RecordingStatus | None, Query()] = None,
+    checked: Annotated[bool | None, Query()] = None,
 ) -> RecordingListResponse:
     recordings = service.list_recordings(
-        limit=limit, offset=offset, device_id=device_id, status=status
+        limit=limit, offset=offset, device_id=device_id, status=status, checked=checked
     )
     return RecordingListResponse(
         items=[RecordingSummary.model_validate(recording) for recording in recordings],
@@ -211,6 +213,17 @@ def reprocess_analysis(
 ) -> RetryResponse:
     job = service.reprocess_analysis(recording_id)
     return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.put("/{recording_id}/checked", response_model=RecordingSummary)
+def set_recording_checked(
+    recording_id: uuid.UUID,
+    payload: RecordingCheckedRequest,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> RecordingSummary:
+    recording = service.set_checked(recording_id, checked=payload.checked)
+    return RecordingSummary.model_validate(recording)
 
 
 @router.put("/{recording_id}/transcript", response_model=TranscriptResponse)

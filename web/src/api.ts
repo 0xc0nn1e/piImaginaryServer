@@ -153,6 +153,7 @@ export function listRecordings(params: {
   offset: number;
   deviceId?: string;
   status?: RecordingStatus | "";
+  checked?: boolean;
 }): Promise<RecordingListResponse> {
   const query = new URLSearchParams({
     limit: String(params.limit),
@@ -160,6 +161,7 @@ export function listRecordings(params: {
   });
   if (params.deviceId) query.set("device_id", params.deviceId);
   if (params.status) query.set("status", params.status);
+  if (params.checked !== undefined) query.set("checked", String(params.checked));
   return request(`/api/v1/recordings?${query.toString()}`);
 }
 
@@ -264,4 +266,15 @@ function requireCsrfCookie(): string {
 
 export function getQueue(): Promise<QueueResponse> {
   return request<QueueResponse>("/api/v1/queue");
+}
+
+export function setRecordingChecked(
+  recordingId: string,
+  checked: boolean,
+  csrfToken: string,
+): Promise<RecordingSummary> {
+  return request<RecordingSummary>(
+    `/api/v1/recordings/${encodeURIComponent(recordingId)}/checked`,
+    { method: "PUT", body: { checked }, csrfToken },
+  );
 }

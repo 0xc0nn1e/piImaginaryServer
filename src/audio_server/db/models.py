@@ -19,6 +19,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -97,6 +98,7 @@ class Recording(Base):
         UniqueConstraint("storage_key", name="uq_recordings_storage_key"),
         Index("ix_recordings_created_at", "created_at"),
         Index("ix_recordings_status_created", "processing_status", "created_at"),
+        Index("ix_recordings_checked_created", "checked", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -120,6 +122,11 @@ class Recording(Base):
     )
     audio_delete_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     transcript_delete_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The only human-set column on a recording: everything else is ingest
+    # identity or pipeline output.
+    checked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     transcript_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     analysis_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

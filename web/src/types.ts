@@ -43,6 +43,7 @@ export interface RecordingSummary {
   sample_rate: number | null;
   channels: number | null;
   processing_status: RecordingStatus;
+  checked: boolean;
   created_at: string;
   updated_at: string;
 }
