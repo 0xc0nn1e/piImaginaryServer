@@ -25,6 +25,7 @@ const recording = {
   sample_rate: 16000,
   channels: 1,
   processing_status: "completed",
+  checked: false,
   created_at: "2026-08-10T00:01:00Z",
   updated_at: "2026-08-10T00:02:00Z",
 };
@@ -997,5 +998,71 @@ describe("confirming a stale translation without retyping it", () => {
     // the stale flag on sentences nobody looked at.
     expect(captured).toEqual([]);
     expect(await screen.findByText(/請先揀要儲存嘅譯文/)).toBeInTheDocument();
+  });
+});
+
+describe("marking a recording reviewed from its own page", () => {
+  it("saves the tick without going back to the list", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let sent: { checked?: boolean } | null = null;
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/checked") && init?.method === "PUT") {
+        sent = JSON.parse(String(init.body));
+        return Promise.resolve(jsonResponse({ ...recording, checked: true }));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    const box = await screen.findByRole("checkbox", { name: "已檢查" });
+    expect(box).not.toBeChecked();
+
+    await browser.click(box);
+
+    await waitFor(() => expect(sent).toEqual({ checked: true }));
+    expect(await screen.findByRole("checkbox", { name: "已檢查" })).toBeChecked();
+  });
+
+  it("clears the failure notice once a retry succeeds", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let failNext = true;
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/checked") && init?.method === "PUT") {
+        if (failNext) {
+          failNext = false;
+          return Promise.resolve(
+            jsonResponse({ error: { code: "boom", message: "nope" } }, 500),
+          );
+        }
+        return Promise.resolve(jsonResponse({ ...recording, checked: true }));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    const box = await screen.findByRole("checkbox", { name: "已檢查" });
+
+    await browser.click(box);
+    expect(await screen.findByText(/未能更新檢查狀態/)).toBeInTheDocument();
+
+    await browser.click(screen.getByRole("checkbox", { name: "已檢查" }));
+
+    // Leaving the notice up would contradict the state the tick now shows.
+    await waitFor(() => expect(screen.queryByText(/未能更新檢查狀態/)).not.toBeInTheDocument());
+    expect(screen.getByRole("checkbox", { name: "已檢查" })).toBeChecked();
   });
 });

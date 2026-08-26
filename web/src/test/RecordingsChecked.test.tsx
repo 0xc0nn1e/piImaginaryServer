@@ -184,4 +184,51 @@ describe("review marks on the recordings list", () => {
     release["recording-1"]?.();
     await waitFor(() => expect(next).toBeEnabled());
   });
+
+  it("keeps a failed page load visible when a tick succeeds", async () => {
+    window.history.replaceState({}, "", "/recordings?checked=all");
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let listFails = false;
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-28T08:00:00Z" });
+      }
+      if (path.endsWith("/checked") && init?.method === "PUT") {
+        return jsonResponse({ ...recording(0), checked: true });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        if (listFails) return jsonResponse({ error: { code: "boom", message: "no" } }, 500);
+        return jsonResponse({ items: [recording(0)], limit: PAGE_SIZE, offset: 0 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("checkbox", { name: "已檢查" });
+
+    // The list refresh starts failing while the page is open. Rows already on
+    // screen stay, so the tick is still reachable. The review filter is left on
+    // "all" so that ticking updates in place instead of refetching -- otherwise
+    // the failing reload would put the notice back and hide the bug.
+    listFails = true;
+    await browser.type(screen.getByRole("textbox", { name: /裝置/ }), "pi-recorder-01");
+    await browser.click(screen.getByRole("button", { name: "套用篩選" }));
+    expect(await screen.findByText(/未能讀取錄音紀錄/)).toBeInTheDocument();
+
+    // Re-query: the earlier render is gone, and clicking a detached node would
+    // flip the box without ever reaching the handler.
+    await browser.click(screen.getByRole("checkbox", { name: "已檢查" }));
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.filter((c) => String(c[0]).endsWith("/checked"))).toHaveLength(1),
+    );
+    // The tick works, but the list is still broken and has to keep saying so.
+    expect(screen.getByText(/未能讀取錄音紀錄/)).toBeInTheDocument();
+  });
 });

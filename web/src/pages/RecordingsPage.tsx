@@ -56,6 +56,9 @@ export function RecordingsPage() {
   const [data, setData] = useState<RecordingListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Separate from the list error: clearing one must not erase the other, or a
+  // failed page load would disappear the moment a tick succeeds.
+  const [checkedError, setCheckedError] = useState<string | null>(null);
   const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -113,6 +116,9 @@ export function RecordingsPage() {
       return;
     }
     setCheckPending((current) => new Set(current).add(recordingId));
+    // A retry that works has to clear the notice from the one that did not, or
+    // the list keeps showing a failure that no longer describes anything.
+    setCheckedError(null);
     try {
       const saved = await setRecordingChecked(recordingId, next, csrfToken);
       // The row stays put even when it stops matching the active filter.
@@ -135,7 +141,7 @@ export function RecordingsPage() {
         navigate("/login", { replace: true });
         return;
       }
-      setError(t("recordings.checkedError"));
+      setCheckedError(t("recordings.checkedError"));
     } finally {
       setCheckPending((current) => {
         const next = new Set(current);
@@ -425,6 +431,11 @@ export function RecordingsPage() {
       {error ? (
         <div className="notice notice-error" role="alert">
           {error}
+        </div>
+      ) : null}
+      {checkedError ? (
+        <div className="notice notice-error" role="alert">
+          {checkedError}
         </div>
       ) : null}
       {!loading && !error && data?.items.length === 0 ? (

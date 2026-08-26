@@ -10,6 +10,7 @@ import {
   getAnalysis,
   getReanalysis,
   getRecording,
+  setRecordingChecked,
   getRecordingAudioUrl,
   getRecordingStatus,
   getTranscript,
@@ -85,6 +86,7 @@ export function RecordingDetailPage() {
   const { locale, t } = useI18n();
   const [tab, setTab] = useState<DetailTab>("overview");
   const [recording, setRecording] = useState<RecordingSummary | null>(null);
+  const [checkPending, setCheckPending] = useState(false);
   const [status, setStatus] = useState<RecordingStatusResponse | null>(null);
   const [activity, setActivity] = useState<ActivityResponse | null>(null);
   const [transcript, setTranscript] = useState<TranscriptState>({ kind: "idle" });
@@ -436,6 +438,27 @@ export function RecordingDetailPage() {
     }
   }
 
+  async function toggleChecked(next: boolean) {
+    const csrfToken = readCsrfCookie();
+    if (!csrfToken) {
+      invalidate();
+      navigate("/login", { replace: true });
+      return;
+    }
+    setCheckPending(true);
+    // A retry that works has to clear the notice from the one that did not, or
+    // the page keeps showing a failure that no longer describes anything.
+    setMutationMessage(null);
+    try {
+      const saved = await setRecordingChecked(id, next, csrfToken);
+      setRecording(saved);
+    } catch (caught: unknown) {
+      handleMutationError(caught, t("recordings.checkedError"));
+    } finally {
+      setCheckPending(false);
+    }
+  }
+
   async function handleRetranslate() {
     setMutationPending("translation");
     setMutationMessage(null);
@@ -571,6 +594,16 @@ export function RecordingDetailPage() {
             {!terminalStatuses.has(status.status) ? (
               <span className="live-indicator">{t("detail.live")}</span>
             ) : null}
+            <label className="checked-toggle">
+              <input
+                type="checkbox"
+                aria-label={t("recordings.checked")}
+                checked={recording.checked}
+                disabled={checkPending}
+                onChange={(event) => void toggleChecked(event.target.checked)}
+              />
+              <span>{t("recordings.checked")}</span>
+            </label>
           </div>
           <h1>{recording.original_filename}</h1>
           <p>{recording.device_id}</p>
