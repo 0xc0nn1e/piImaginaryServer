@@ -28,6 +28,7 @@ from audio_server.api.schemas import (
     RetryResponse,
     TranscriptResponse,
     TranscriptSegmentResponse,
+    TranscriptTranslationResponse,
     TranscriptUpdateRequest,
     UploadRecordingResponse,
 )
@@ -177,6 +178,11 @@ def get_transcript(
         revision=recording.transcript_revision,
         text=_format_transcript(segment_responses),
         segments=segment_responses,
+        translations=[
+            TranscriptTranslationResponse.model_validate(row, from_attributes=True)
+            for row in service.list_translations(recording_id)
+        ],
+        translation_revision=recording.translation_revision,
         furigana=_segment_furigana(segment_responses),
     )
 
@@ -212,6 +218,18 @@ def reprocess_analysis(
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> RetryResponse:
     job = service.reprocess_analysis(recording_id)
+    return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
+
+
+@router.post(
+    "/{recording_id}/translation/reprocess", response_model=RetryResponse, status_code=202
+)
+def reprocess_translation(
+    recording_id: uuid.UUID,
+    _principal: Annotated[object, Depends(require_mutation_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> RetryResponse:
+    job = service.reprocess_translation(recording_id)
     return RetryResponse(recording_id=recording_id, job_id=job.id, status=job.status)
 
 
@@ -258,6 +276,11 @@ def update_transcript(
         revision=recording.transcript_revision,
         text=_format_transcript(responses),
         segments=responses,
+        translations=[
+            TranscriptTranslationResponse.model_validate(row, from_attributes=True)
+            for row in service.list_translations(recording_id)
+        ],
+        translation_revision=recording.translation_revision,
         furigana=_segment_furigana(responses),
     )
 

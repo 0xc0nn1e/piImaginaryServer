@@ -6,7 +6,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from audio_server.processing.analysis import DisabledAnalysisProvider
+from audio_server.processing.analysis import (
+    DisabledAnalysisProvider,
+    DisabledTranslationProvider,
+)
 from audio_server.processing.contracts import (
     AnalysisProvider,
     AnalysisResult,
@@ -20,6 +23,8 @@ from audio_server.processing.contracts import (
     RecordingIdentifier,
     StageCallback,
     TranscriptionProvider,
+    TranslationProvider,
+    TranslationResult,
 )
 from audio_server.processing.errors import (
     PermanentProcessingError,
@@ -45,12 +50,14 @@ class ProcessingPipeline:
         transcription_provider: TranscriptionProvider,
         diarization_provider: DiarizationProvider,
         analysis_provider: AnalysisProvider | None = None,
+        translation_provider: TranslationProvider | None = None,
         merger: TimestampTranscriptMerger | None = None,
     ) -> None:
         self._audio_processor = audio_processor
         self._transcription_provider = transcription_provider
         self._diarization_provider = diarization_provider
         self._analysis_provider = analysis_provider or DisabledAnalysisProvider()
+        self._translation_provider = translation_provider or DisabledTranslationProvider()
         self._merger = merger or TimestampTranscriptMerger()
 
     def load_providers(self) -> None:
@@ -59,6 +66,7 @@ class ProcessingPipeline:
         for provider in (
             self._transcription_provider,
             self._diarization_provider,
+            self._translation_provider,
             self._analysis_provider,
         ):
             load = getattr(provider, "load", None)
@@ -110,6 +118,9 @@ class ProcessingPipeline:
             retryable_unknown=False,
         )
 
+        _notify(stage_callback, ProcessingStage.TRANSLATING)
+        translation = self._translate_without_breaking_transcript(str(recording_id), transcript)
+
         _notify(stage_callback, ProcessingStage.ANALYZING)
         analysis = self._analyze_without_breaking_transcript(str(recording_id), transcript)
 
@@ -119,9 +130,34 @@ class ProcessingPipeline:
             audio=audio_probe,
             transcript=transcript,
             analysis=analysis,
+            translation=translation,
             transcription_language=transcription.language,
             transcription_language_probability=transcription.language_probability,
         )
+
+    def _translate_without_breaking_transcript(
+        self,
+        recording_id: str,
+        transcript: tuple[MergedTranscriptSegment, ...],
+    ) -> TranslationResult:
+        """Translation is optional, so a failure must never cost the transcript."""
+
+        try:
+            return self._translation_provider.translate(recording_id, transcript)
+        except ProcessingError as exc:
+            return TranslationResult(
+                status=AnalysisStatus.FAILED,
+                provider=self._translation_provider.name,
+                error_code=exc.code,
+                error_message=exc.safe_message,
+            )
+        except Exception:
+            return TranslationResult(
+                status=AnalysisStatus.FAILED,
+                provider=self._translation_provider.name,
+                error_code="translation_failed",
+                error_message="Transcript translation failed.",
+            )
 
     def _analyze_without_breaking_transcript(
         self,

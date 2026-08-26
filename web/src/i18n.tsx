@@ -227,6 +227,11 @@ const ja = {
   "detail.speaker": "話者",
   "detail.startTime": "開始（秒）",
   "detail.endTime": "終了（秒）",
+  "detail.retranslate": "広東語訳を作り直す",
+  "detail.retranslating": "予約中…",
+  "detail.retranslateQueued": "広東語訳の作り直しを予約しました。新しい訳ができるまで既存の訳を保持します。",
+  "detail.retranslateError": "広東語訳の作り直しを予約できませんでした。",
+  "detail.translationStale": "（文字起こしが編集されたため、この訳は最新ではありません）",
   "detail.transcriptLoading": "文字起こしを読み込み中…",
   "detail.transcriptPending": "文字起こしを準備中です",
   "detail.transcriptPendingDescription": "バックグラウンド処理が完了すると自動で再読み込みします。",
@@ -293,7 +298,7 @@ const ja = {
   "duration.seconds": "{seconds}秒",
 } as const;
 
-type TranslationKey = keyof typeof ja;
+export type TranslationKey = keyof typeof ja;
 
 const zhHK: Record<TranslationKey, string> = {
   "meta.description": "管理私人錄音處理狀態、講者分段及逐字稿的 Wave Archive。",
@@ -510,6 +515,11 @@ const zhHK: Record<TranslationKey, string> = {
   "detail.speaker": "講者",
   "detail.startTime": "開始（秒）",
   "detail.endTime": "結束（秒）",
+  "detail.retranslate": "重新翻譯廣東話",
+  "detail.retranslating": "正在排程…",
+  "detail.retranslateQueued": "已安排重新翻譯；新譯文完成前會保留現有譯文。",
+  "detail.retranslateError": "未能安排重新翻譯。",
+  "detail.translationStale": "（逐字稿改咗，呢句譯文未更新）",
   "detail.transcriptLoading": "正在讀取逐字稿…",
   "detail.transcriptPending": "逐字稿仍在準備",
   "detail.transcriptPendingDescription": "背景處理完成後會自動重新讀取。",

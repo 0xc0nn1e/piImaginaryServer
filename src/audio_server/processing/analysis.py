@@ -23,6 +23,7 @@ from audio_server.processing.contracts import (
     AnalysisResult,
     AnalysisStatus,
     MergedTranscriptSegment,
+    TranslationResult,
 )
 from audio_server.processing.errors import (
     PermanentProcessingError,
@@ -50,6 +51,22 @@ class DisabledAnalysisProvider:
             provider=self.name,
             schema_version=2,
         )
+
+
+class DisabledTranslationProvider:
+    """Stands in when no LLM is configured, so the pipeline stays uniform."""
+
+    @property
+    def name(self) -> str:
+        return "disabled"
+
+    def translate(
+        self,
+        recording_id: str,
+        segments: Sequence[MergedTranscriptSegment],
+    ) -> TranslationResult:
+        del recording_id, segments
+        return TranslationResult(status=AnalysisStatus.SKIPPED, provider=self.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,34 +282,11 @@ class LMStudioAnalysisProvider:
                 )
         except ProcessingError:
             raise
-        except (TimeoutError, ConnectionError, OSError) as exc:
-            raise RetryableProcessingError(
-                code="lmstudio_unavailable",
-                safe_message="LM Studio is temporarily unavailable.",
-            ) from exc
         except Exception as exc:
-            error_name = type(exc).__name__.lower()
-            error_text = str(exc).casefold()
-            if (
-                "auth" in error_name
-                or "permission" in error_name
-                or "auth" in error_text
-                or "permission" in error_text
-                or "unauthorized" in error_text
-                or "forbidden" in error_text
-            ):
-                raise ProviderConfigurationError(
-                    code="lmstudio_authentication_failed",
-                    safe_message="LM Studio rejected the configured API token.",
-                ) from exc
-            if "timeout" in error_name or "websocket" in error_name or "client" in error_name:
-                raise RetryableProcessingError(
-                    code="lmstudio_unavailable",
-                    safe_message="LM Studio is temporarily unavailable.",
-                ) from exc
-            raise PermanentProcessingError(
-                code="lmstudio_analysis_failed",
-                safe_message="LM Studio could not produce a valid structured analysis.",
+            raise classify_lmstudio_failure(
+                exc,
+                permanent_code="lmstudio_analysis_failed",
+                permanent_message="LM Studio could not produce a valid structured analysis.",
             ) from exc
 
     def _respond(self, model: _LoadedModel, prompt: str) -> _AnalysisDraft:
@@ -358,6 +352,57 @@ def _safe_path(location: Sequence[object]) -> str:
         for part in location
     ]
     return ".".join(parts) or "<root>"
+
+
+def classify_lmstudio_failure(
+    exc: Exception, *, permanent_code: str, permanent_message: str
+) -> ProcessingError:
+    """Map an SDK failure onto the retry policy.
+
+    Every LM Studio call has to classify failures the same way, or one feature
+    would retry a misconfiguration the other treats as fatal.
+    """
+
+    if isinstance(exc, TimeoutError | ConnectionError | OSError):
+        return RetryableProcessingError(
+            code="lmstudio_unavailable",
+            safe_message="LM Studio is temporarily unavailable.",
+        )
+    error_name = type(exc).__name__.lower()
+    error_text = str(exc).casefold()
+    if (
+        "auth" in error_name
+        or "permission" in error_name
+        or "auth" in error_text
+        or "permission" in error_text
+        or "unauthorized" in error_text
+        or "forbidden" in error_text
+    ):
+        return ProviderConfigurationError(
+            code="lmstudio_authentication_failed",
+            safe_message="LM Studio rejected the configured API token.",
+        )
+    if "timeout" in error_name or "websocket" in error_name or "client" in error_name:
+        return RetryableProcessingError(
+            code="lmstudio_unavailable",
+            safe_message="LM Studio is temporarily unavailable.",
+        )
+    return PermanentProcessingError(code=permanent_code, safe_message=permanent_message)
+
+
+def require_single_loaded_model(client: _LMStudioClient) -> _LoadedModel:
+    """Refuse to guess which model to use when the operator loaded several."""
+
+    loaded = list(client.list_loaded_models("llm"))
+    if len(loaded) == 1:
+        return loaded[0]
+    code = "lmstudio_model_not_loaded" if not loaded else "lmstudio_multiple_models"
+    message = (
+        "Load exactly one LLM in LM Studio before running this step."
+        if not loaded
+        else "Unload extra LLMs in LM Studio so exactly one remains loaded."
+    )
+    raise ProviderConfigurationError(code=code, safe_message=message)
 
 
 def chunk_transcript(

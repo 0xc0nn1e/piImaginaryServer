@@ -43,7 +43,7 @@ def read_queue(
     # Each kind is served by its own worker, so one shared cap could hide every
     # analysis job behind a backlog of transcription work.
     rows = [
-        row for kind in (JobKind.FULL, JobKind.ANALYSIS)
+        row for kind in (JobKind.FULL, JobKind.ANALYSIS, JobKind.TRANSLATION)
         for row in service.list_active_jobs(limit=limit, kind=kind)
     ]
     items = [

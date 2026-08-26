@@ -375,3 +375,247 @@ describe("recording transcript states", () => {
     expect((mutation?.[1]?.headers as Headers).get("X-CSRF-Token")).toBe("synthetic-csrf");
   });
 });
+
+describe("Cantonese translations under the transcript", () => {
+  it("renders a sentence translation after the last segment it covers", async () => {
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "昨日は",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+        {
+          id: "segment-2",
+          sequence: 1,
+          speaker_label: "SPEAKER_00",
+          start_time: 1,
+          end_time: 2,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [
+        {
+          id: "translation-1",
+          start_segment_id: "segment-1",
+          end_segment_id: "segment-2",
+          source_ja: "昨日は行きました。",
+          text_zh_hk: "尋日去咗。",
+          source: "llm",
+          stale: false,
+        },
+      ],
+      translation_revision: 1,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal("fetch", mockDetailApi(jsonResponse(transcript)));
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+
+    const line = await screen.findByText("尋日去咗。");
+    // The sentence spans two segments, so the translation belongs to the last.
+    expect(line.closest("li")).toHaveTextContent("行きました。");
+    expect(line.closest("li")).not.toHaveTextContent("昨日は");
+    expect(line).not.toHaveClass("is-stale");
+  });
+
+  it("marks a translation stale once the transcript has been edited", async () => {
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 2,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [
+        {
+          id: "translation-1",
+          start_segment_id: "segment-1",
+          end_segment_id: "segment-1",
+          source_ja: "行きました。",
+          text_zh_hk: "去咗。",
+          source: "llm",
+          stale: true,
+        },
+      ],
+      translation_revision: 2,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal("fetch", mockDetailApi(jsonResponse(transcript)));
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+
+    const line = await screen.findByText(/去咗。/);
+    // Kept rather than deleted, but visibly no longer trusted.
+    expect(line).toHaveClass("is-stale");
+    expect(line).toHaveTextContent("逐字稿改咗");
+  });
+
+  it("reloads the transcript after queueing a retranslation", async () => {
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [],
+      translation_revision: 0,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let transcriptLoads = 0;
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/translation/reprocess")) {
+        return Promise.resolve(
+          jsonResponse({ recording_id: recordingId, job_id: "job-2", status: "queued" }, 202),
+        );
+      }
+      if (path.endsWith("/transcript")) {
+        transcriptLoads += 1;
+        return Promise.resolve(jsonResponse(transcript));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await waitFor(() => expect(transcriptLoads).toBe(1));
+
+    await browser.click(screen.getByRole("button", { name: "重新翻譯廣東話" }));
+
+    // The load effect does not watch transcript.kind, so the panel would sit on
+    // its loading state unless the refresh is asked for explicitly.
+    await waitFor(() => expect(transcriptLoads).toBe(2));
+    expect(await screen.findByText(/已安排重新翻譯/)).toBeInTheDocument();
+  });
+
+  it("fetches the finished translation once the job leaves the queue", async () => {
+    const withTranslation = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [
+        {
+          id: "translation-1",
+          start_segment_id: "segment-1",
+          end_segment_id: "segment-1",
+          source_ja: "行きました。",
+          text_zh_hk: "去咗。",
+          source: "llm",
+          stale: false,
+        },
+      ],
+      translation_revision: 1,
+      furigana: {},
+    };
+    const withoutTranslation = { ...withTranslation, translations: [], translation_revision: 0 };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    let translating = true;
+    const base = mockDetailApi(jsonResponse(withoutTranslation));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/status")) {
+        return Promise.resolve(
+          jsonResponse({
+            recording_id: recordingId,
+            status: "completed",
+            job: {
+              id: "job-2",
+              kind: "translation",
+              status: translating ? "processing" : "completed",
+              stage: translating ? "translating" : "completed",
+              attempt_count: 1,
+              max_attempts: 3,
+              available_at: "2026-08-10T00:01:00Z",
+              started_at: "2026-08-10T00:01:01Z",
+              finished_at: translating ? null : "2026-08-10T00:02:00Z",
+              error: null,
+            },
+          }),
+        );
+      }
+      if (path.endsWith("/transcript")) {
+        return Promise.resolve(jsonResponse(translating ? withoutTranslation : withTranslation));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await screen.findByText("行きました。");
+    expect(screen.queryByText("去咗。")).not.toBeInTheDocument();
+
+    // The job finishes in the background; polling has to notice and refetch,
+    // otherwise the finished translation never reaches the page.
+    translating = false;
+
+    expect(await screen.findByText("去咗。", undefined, { timeout: 8000 })).toBeInTheDocument();
+  }, 12000);
+});

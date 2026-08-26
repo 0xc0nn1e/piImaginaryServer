@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import shutil
-from collections.abc import Callable
+import uuid
+from collections import defaultdict
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -16,6 +18,8 @@ from audio_server.db.models import (
     JobKind,
     Recording,
     TranscriptSegment,
+    TranscriptTranslation,
+    TranslationSource,
 )
 from audio_server.jobs.queue import ClaimedJob, JobQueue, ResultPersister, RetryPolicy
 from audio_server.jobs.worker import (
@@ -27,6 +31,7 @@ from audio_server.jobs.worker import (
 )
 from audio_server.processing.analysis import (
     DisabledAnalysisProvider,
+    DisabledTranslationProvider,
     LMStudioAnalysisProvider,
     LMStudioSettings,
 )
@@ -37,6 +42,8 @@ from audio_server.processing.contracts import (
     DiarizationProvider,
     MergedTranscriptSegment,
     PipelineResult,
+    TranslationProvider,
+    TranslationResult,
 )
 from audio_server.processing.contracts import (
     AnalysisStatus as PipelineAnalysisStatus,
@@ -48,7 +55,9 @@ from audio_server.processing.diarization import (
 )
 from audio_server.processing.errors import PermanentProcessingError, ProviderConfigurationError
 from audio_server.processing.pipeline import ProcessingPipeline
+from audio_server.processing.sentences import TranscriptSentence, group_sentences
 from audio_server.processing.transcription import FasterWhisperProvider, FasterWhisperSettings
+from audio_server.processing.translation import LMStudioTranslationProvider
 from audio_server.services.storage import LocalStorageBackend, StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -62,15 +71,19 @@ class PipelineJobProcessor:
         storage: StorageBackend,
         pipeline: ProcessingPipeline | None = None,
         analysis_provider: AnalysisProvider | None = None,
+        translation_provider: TranslationProvider | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._pipeline = pipeline
         self._analysis_provider = analysis_provider or DisabledAnalysisProvider()
+        self._translation_provider = translation_provider or DisabledTranslationProvider()
 
     def __call__(self, claim: ClaimedJob, progress: ProgressCallback) -> ResultPersister:
         if claim.kind is JobKind.ANALYSIS:
             return self._process_analysis(claim)
+        if claim.kind is JobKind.TRANSLATION:
+            return self._process_translation(claim)
         if self._pipeline is None:
             # claim_next is filtered by kind, so this only fires if a worker is
             # misconfigured; fail loudly rather than silently dropping the job.
@@ -119,7 +132,21 @@ class PipelineJobProcessor:
 
         return _result_persister(claim, result)
 
-    def _process_analysis(self, claim: ClaimedJob) -> ResultPersister:
+    def _process_translation(self, claim: ClaimedJob) -> ResultPersister:
+        """Read the committed transcript only; never touch audio."""
+
+        segments = self._load_transcript(claim)
+        result = self._translation_provider.translate(str(claim.recording_id), segments)
+        if result.status is PipelineAnalysisStatus.FAILED:
+            raise PermanentProcessingError(
+                code=result.error_code or "translation_failed",
+                safe_message=result.error_message or "Transcript translation failed.",
+            )
+        return _translation_result_persister(claim, result)
+
+    def _load_transcript(self, claim: ClaimedJob) -> tuple[MergedTranscriptSegment, ...]:
+        """Read the committed transcript for a job that must not touch audio."""
+
         with self._session_factory() as session:
             rows = list(
                 session.scalars(
@@ -128,7 +155,7 @@ class PipelineJobProcessor:
                     .order_by(TranscriptSegment.sequence)
                 )
             )
-        transcript = tuple(
+        return tuple(
             MergedTranscriptSegment(
                 sequence=row.sequence,
                 speaker_label=row.speaker_label,
@@ -141,6 +168,9 @@ class PipelineJobProcessor:
             )
             for row in rows
         )
+
+    def _process_analysis(self, claim: ClaimedJob) -> ResultPersister:
+        transcript = self._load_transcript(claim)
         result = self._analysis_provider.analyze(str(claim.recording_id), transcript)
         if result.status is PipelineAnalysisStatus.FAILED:
             raise PermanentProcessingError(
@@ -157,6 +187,14 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
             raise PermanentProcessingError(
                 code="recording_missing", safe_message="The recording metadata is unavailable."
             )
+        # Deleting the segments cascades their translations away, so the
+        # administrator's own writing is captured first.
+        preserved = _capture_manual_translations(session, claim.recording_id)
+        session.execute(
+            delete(TranscriptTranslation).where(
+                TranscriptTranslation.recording_id == claim.recording_id
+            )
+        )
         session.execute(
             delete(TranscriptSegment).where(TranscriptSegment.recording_id == claim.recording_id)
         )
@@ -200,6 +238,246 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
         analysis.error_message = result.analysis.error_message
         analysis.completed_at = datetime.now(UTC)
         recording.analysis_revision += 1
+        _carry_manual_translations(
+            session, claim.recording_id, result.transcript, preserved
+        )
+        _write_translations(session, claim.recording_id, result.translation)
+        recording.translation_revision += 1
+
+    return persist
+
+
+# Whisper's segment boundaries move a little between runs over the same audio,
+# so a match is made within a small window rather than on an exact timestamp.
+_SAME_UTTERANCE_SECONDS = 0.75
+
+
+def _count_within(moments: Sequence[float], start_time: float) -> int:
+    return sum(1 for moment in moments if abs(moment - start_time) <= _SAME_UTTERANCE_SECONDS)
+
+
+def _unique_match(
+    sentences: Sequence[TranscriptSentence], start_time: float
+) -> TranscriptSentence | None:
+    """Return the one sentence at this moment, or nothing if it is ambiguous.
+
+    Picking the nearest of several candidates would let the order rows happen to
+    be read in decide which line a hand-written translation lands under. Losing a
+    translation is visible and can be rewritten; silently attaching it to the
+    wrong sentence is neither.
+    """
+
+    within = [
+        sentence
+        for sentence in sentences
+        if abs(sentence.start_time - start_time) <= _SAME_UTTERANCE_SECONDS
+    ]
+    return within[0] if len(within) == 1 else None
+
+
+def _capture_manual_translations(
+    session: Session, recording_id: uuid.UUID
+) -> list[tuple[str, float, str]]:
+    """Record each hand-written rendering as (sentence, when it was said, text).
+
+    Re-transcription replaces segment ids and renumbers sequences, and it also
+    changes how many times a short line is recognised -- adding or dropping an
+    interjection is exactly why someone reprocesses. Neither ids nor ordinals
+    survive that. The audio does: the same words spoken at the same moment are
+    the same utterance.
+    """
+
+    rows = [
+        row
+        for row in session.scalars(
+            select(TranscriptTranslation).where(
+                TranscriptTranslation.recording_id == recording_id
+            )
+        )
+        if row.source is TranslationSource.MANUAL
+    ]
+    if not rows:
+        return []
+    old_transcript = _read_transcript(session, recording_id)
+    start_time_of_sentence = {
+        sentence.start_sequence: sentence.start_time
+        for sentence in group_sentences(old_transcript)
+    }
+    sequence_of_segment = {
+        segment_id: sequence
+        for segment_id, sequence in session.execute(
+            select(TranscriptSegment.id, TranscriptSegment.sequence).where(
+                TranscriptSegment.recording_id == recording_id
+            )
+        )
+    }
+    captured: list[tuple[str, float, str]] = []
+    for row in rows:
+        sequence = sequence_of_segment.get(row.start_segment_id)
+        if sequence is None:
+            continue
+        start_time = start_time_of_sentence.get(sequence)
+        if start_time is None:
+            # The row no longer starts a sentence, so the moment it described
+            # cannot be established; guessing would misplace the words.
+            continue
+        captured.append((row.source_ja, start_time, row.text_zh_hk))
+    return captured
+
+
+def _read_transcript(
+    session: Session, recording_id: uuid.UUID
+) -> tuple[MergedTranscriptSegment, ...]:
+    return tuple(
+        MergedTranscriptSegment(
+            sequence=row.sequence,
+            speaker_label=row.speaker_label,
+            start=row.start_time,
+            end=row.end_time,
+            text=row.text,
+            language=row.language,
+            confidence=row.confidence,
+            has_overlap=row.has_overlap,
+        )
+        for row in session.scalars(
+            select(TranscriptSegment)
+            .where(TranscriptSegment.recording_id == recording_id)
+            .order_by(TranscriptSegment.sequence)
+        )
+    )
+
+
+def _carry_manual_translations(
+    session: Session,
+    recording_id: uuid.UUID,
+    transcript: Sequence[MergedTranscriptSegment],
+    preserved: Sequence[tuple[str, float, str]],
+) -> None:
+    """Re-attach hand-written translations to a freshly written transcript.
+
+    Re-transcription replaces every segment, so the rows that referenced the old
+    ones are gone. A rendering whose Japanese sentence came back word for word
+    still applies and is restored; one whose words changed does not, and is not
+    resurrected against text it was never written for.
+    """
+
+    if not preserved:
+        return
+    session.flush()
+    by_sequence = {
+        sequence: segment_id
+        for segment_id, sequence in session.execute(
+            select(TranscriptSegment.id, TranscriptSegment.sequence).where(
+                TranscriptSegment.recording_id == recording_id
+            )
+        )
+    }
+    # The same short line is said over and over, so identical text is not an
+    # identity. The audio is unchanged by reprocessing, so a rendering is
+    # restored onto the sentence with the same words at the same moment -- and
+    # only when that moment identifies exactly one sentence.
+    candidates: dict[str, list[TranscriptSentence]] = defaultdict(list)
+    for sentence in group_sentences(transcript):
+        candidates[sentence.text].append(sentence)
+    written_at: dict[str, list[float]] = defaultdict(list)
+    for source_ja, start_time, _text in preserved:
+        written_at[source_ja].append(start_time)
+    for source_ja, start_time, text_zh_hk in preserved:
+        match = _unique_match(candidates.get(source_ja, []), start_time)
+        if match is None:
+            continue
+        sentence = match
+        # The sentence has to point back at exactly this one rendering too. If a
+        # new pass merges two lines the administrator translated separately,
+        # both renderings see a single candidate and whichever row happened to
+        # be read first would claim it.
+        if _count_within(written_at[source_ja], sentence.start_time) != 1:
+            continue
+        start_id = by_sequence.get(sentence.start_sequence)
+        end_id = by_sequence.get(sentence.end_sequence)
+        if start_id is None or end_id is None:
+            continue
+        session.add(
+            TranscriptTranslation(
+                recording_id=recording_id,
+                start_segment_id=start_id,
+                end_segment_id=end_id,
+                source_ja=source_ja,
+                text_zh_hk=text_zh_hk,
+                source=TranslationSource.MANUAL,
+            )
+        )
+
+
+def _write_translations(
+    session: Session, recording_id: uuid.UUID, result: TranslationResult | None
+) -> None:
+    """Store one Cantonese rendering per sentence, keyed by segment id.
+
+    A failed or skipped run leaves whatever is already stored alone, and a
+    hand-written translation is never replaced by a machine one.
+    """
+
+    if result is None or AnalysisStatus(result.status.value) is not AnalysisStatus.COMPLETED:
+        return
+    # Segments inserted in this transaction need ids before they can be linked.
+    session.flush()
+    by_sequence = {
+        sequence: segment_id
+        for segment_id, sequence in session.execute(
+            select(TranscriptSegment.id, TranscriptSegment.sequence).where(
+                TranscriptSegment.recording_id == recording_id
+            )
+        )
+    }
+    existing = {
+        row.start_segment_id: row
+        for row in session.scalars(
+            select(TranscriptTranslation)
+            .where(TranscriptTranslation.recording_id == recording_id)
+            .with_for_update()
+        )
+    }
+    for translation in result.translations:
+        start_id = by_sequence.get(translation.start_sequence)
+        end_id = by_sequence.get(translation.end_sequence)
+        if start_id is None or end_id is None:
+            # The transcript moved under this result; drop the orphan rather
+            # than attach it to the wrong words.
+            continue
+        current = existing.get(start_id)
+        if current is not None and current.source is TranslationSource.MANUAL:
+            continue
+        if current is None:
+            session.add(
+                TranscriptTranslation(
+                    recording_id=recording_id,
+                    start_segment_id=start_id,
+                    end_segment_id=end_id,
+                    source_ja=translation.source_ja,
+                    text_zh_hk=translation.text_zh_hk,
+                    source=TranslationSource.LLM,
+                )
+            )
+            continue
+        current.end_segment_id = end_id
+        current.source_ja = translation.source_ja
+        current.text_zh_hk = translation.text_zh_hk
+        current.source = TranslationSource.LLM
+        current.stale = False
+
+
+def _translation_result_persister(
+    claim: ClaimedJob, result: TranslationResult
+) -> ResultPersister:
+    def persist(session: Session) -> None:
+        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        if recording is None:
+            raise PermanentProcessingError(
+                code="recording_missing", safe_message="The recording metadata is unavailable."
+            )
+        _write_translations(session, claim.recording_id, result)
+        recording.translation_revision += 1
 
     return persist
 
@@ -256,24 +534,35 @@ def build_worker(worker_index: int) -> Worker:
 
     def processor_factory() -> JobProcessor:
         analysis_provider = _build_analysis_provider(settings)
+        translation_provider = _build_translation_provider(settings)
         if not transcribes:
             # An analysis-only worker must not pay for Whisper and pyannote:
             # loading them would cost gigabytes of memory it never uses.
             load = getattr(analysis_provider, "load", None)
             if callable(load):
                 load()
+            for provider in (analysis_provider, translation_provider):
+                load = getattr(provider, "load", None)
+                if callable(load):
+                    load()
             return PipelineJobProcessor(
                 session_factory=database.session_factory,
                 storage=storage,
                 analysis_provider=analysis_provider,
+                translation_provider=translation_provider,
             )
-        pipeline = _build_pipeline(settings, analysis_provider=analysis_provider)
+        pipeline = _build_pipeline(
+            settings,
+            analysis_provider=analysis_provider,
+            translation_provider=translation_provider,
+        )
         pipeline.load_providers()
         return PipelineJobProcessor(
             session_factory=database.session_factory,
             storage=storage,
             pipeline=pipeline,
             analysis_provider=analysis_provider,
+            translation_provider=translation_provider,
         )
 
     return Worker(
@@ -296,7 +585,10 @@ def _parse_job_kinds(value: str) -> frozenset[JobKind] | None:
 
 
 def _build_pipeline(
-    settings: Settings, *, analysis_provider: AnalysisProvider | None = None
+    settings: Settings,
+    *,
+    analysis_provider: AnalysisProvider | None = None,
+    translation_provider: TranslationProvider | None = None,
 ) -> ProcessingPipeline:
     audio_processor = AudioProcessor(
         FFmpegSettings(
@@ -333,6 +625,26 @@ def _build_pipeline(
         transcription_provider=transcription_provider,
         diarization_provider=diarization_provider,
         analysis_provider=analysis_provider or _build_analysis_provider(settings),
+        translation_provider=translation_provider or _build_translation_provider(settings),
+    )
+
+
+def _build_translation_provider(settings: Settings) -> TranslationProvider:
+    if not settings.llm_enabled:
+        return DisabledTranslationProvider()
+    if settings.llm_provider != "lmstudio":
+        raise ProviderConfigurationError(
+            code="translation_provider_invalid",
+            safe_message="The configured LLM translation provider is unsupported.",
+        )
+    return LMStudioTranslationProvider(
+        LMStudioSettings(
+            host=settings.lm_studio_host,
+            api_key=settings.lm_studio_api_key.get_secret_value(),
+            timeout_seconds=settings.lm_studio_timeout_seconds,
+            chunk_chars=settings.lm_studio_chunk_chars,
+            max_tokens=settings.lm_studio_max_tokens,
+        )
     )
 
 

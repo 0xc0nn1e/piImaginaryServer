@@ -1191,7 +1191,7 @@ select {
 .recording-card {
   min-width: 0;
   display: grid;
-  grid-template-columns: 50px minmax(250px, 1fr) minmax(270px, 0.55fr) 46px;
+  grid-template-columns: 50px minmax(250px, 1fr) minmax(270px, 0.55fr) auto;
   gap: 18px;
   align-items: center;
   padding: 15px 16px;
@@ -2050,7 +2050,7 @@ select {
   }
 
   .recording-card {
-    grid-template-columns: 42px minmax(220px, 1fr) 42px;
+    grid-template-columns: 42px minmax(220px, 1fr) auto;
   }
 
   .recording-facts {
@@ -2179,7 +2179,7 @@ select {
   }
 
   .recording-card {
-    grid-template-columns: 28px minmax(0, 1fr) 40px;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
     gap: 11px;
     padding: 14px 12px;
   }
@@ -2192,6 +2192,14 @@ select {
     align-items: flex-start;
     flex-direction: column;
     gap: 7px;
+  }
+
+  .checked-toggle span {
+    display: none;
+  }
+
+  .filtered-out-note {
+    display: none;
   }
 
   .recording-card h2 {
@@ -2269,7 +2277,7 @@ select {
   }
 
   .recording-card {
-    grid-template-columns: minmax(0, 1fr) 40px;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .detail-actions {
@@ -2473,13 +2481,25 @@ blockquote:has(ruby),
   margin: 18px 0 8px;
 }
 
+.recording-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.checked-control {
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+}
+
 .checked-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
   color: var(--muted);
   font-size: 0.75rem;
+  white-space: nowrap;
   cursor: pointer;
   user-select: none;
 }
@@ -2498,7 +2518,30 @@ blockquote:has(ruby),
 }
 
 .filtered-out-note {
+  max-width: 190px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.segment-translation {
+  margin: 6px 0 0;
+  padding-left: 10px;
+  border-left: 2px solid rgb(189 124 255 / 35%);
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.segment-translation.is-stale {
+  border-left-color: rgb(255 190 90 / 45%);
+  opacity: 0.75;
+}
+
+.segment-translation small {
+  display: block;
+  margin-top: 2px;
   color: var(--muted);
   font-size: 0.7rem;
-  flex-basis: 100%;
 }

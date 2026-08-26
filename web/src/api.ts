@@ -278,3 +278,10 @@ export function setRecordingChecked(
     { method: "PUT", body: { checked }, csrfToken },
   );
 }
+
+export function reprocessTranslation(recordingId: string): Promise<ProcessingRequestResponse> {
+  return request<ProcessingRequestResponse>(
+    `/api/v1/recordings/${encodeURIComponent(recordingId)}/translation/reprocess`,
+    { method: "POST", csrfToken: requireCsrfCookie() },
+  );
+}

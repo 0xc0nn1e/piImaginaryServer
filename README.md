@@ -468,6 +468,7 @@ must inspect and quarantine repeatedly rejected client items.
 | `POST` | `/api/v1/recordings` | Validate, durably store, enqueue, and return immediately. |
 | `POST` | `/api/v1/web/recordings` | Session/Origin/CSRF-protected MP3/WAV/M4A browser upload. |
 | `PUT` | `/api/v1/recordings/{id}/checked` | Set or clear the administrator's review mark. Browser session or Bearer. |
+| `POST` | `/api/v1/recordings/{id}/translation/reprocess` | Queue a Cantonese translation of the committed transcript. |
 | `GET` | `/api/v1/recordings` | Paginated newest-first list; optional device/status filters. |
 | `GET` | `/api/v1/recordings/{id}` | Recording metadata without an absolute filesystem path. |
 | `GET` | `/api/v1/recordings/{id}/audio` | Session-protected original audio stream with HTTP byte-range support. |
@@ -667,6 +668,23 @@ One queue holds both job kinds, and a claim takes the oldest available job
 regardless of kind. A `full` job occupies its worker for the whole
 transcription, so an `analysis` job -- a single network call to LM Studio --
 can otherwise wait hours behind CPU-bound work it does not depend on.
+
+A `translation` job renders each sentence of the committed transcript in
+Cantonese. Sentences are grouped by the server, never by the model: Whisper
+splits on pauses rather than grammar, and letting the model choose the spans
+would let it return ranges that do not exist. Each row is keyed by the first and
+last segment id it covers, so a transcript edit -- which rewrites sequence
+numbers but keeps ids -- cannot slide a translation onto the wrong words. An
+edit marks every translation stale rather than deleting it, and a machine run
+never overwrites a hand-written one.
+
+Re-transcription replaces every segment, so hand-written translations are
+carried across by matching the sentence text at the same moment in the audio,
+which is the one thing reprocessing does not change. A match is only made when
+the moment identifies exactly one sentence and that sentence identifies exactly
+one translation, so the outcome never depends on the order rows are read in.
+Losing a translation is visible and can be rewritten, while attaching it to the
+wrong line would not be.
 
 `WORKER_JOB_KINDS` restricts which kinds a worker claims. A worker that omits
 `full` never loads Whisper or pyannote, so an analysis-only worker costs a

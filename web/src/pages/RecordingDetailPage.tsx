@@ -18,14 +18,22 @@ import {
   reprocessRecording,
   updateAnalysis,
   updateTranscript,
+  reprocessTranslation,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { Furigana } from "../components/Furigana";
 import { LoadingView } from "../components/LoadingView";
 import { StatusBadge } from "../components/StatusBadge";
 import { formatBytes, formatDateTime, formatDuration, formatTimestamp } from "../format";
-import { activityLabelKey, stageLabelKey, statusLabelKey, useI18n } from "../i18n";
+import {
+  type TranslationKey,
+  activityLabelKey,
+  stageLabelKey,
+  statusLabelKey,
+  useI18n,
+} from "../i18n";
 import type {
+  TranscriptTranslation,
   ActivityResponse,
   AnalysisResponse,
   AnalysisResultV2,
@@ -46,7 +54,7 @@ type AnalysisState =
   | { kind: "idle" | "loading" | "pending" }
   | { kind: "ready"; data: AnalysisResponse }
   | { kind: "error"; message: string };
-type Mutation = "reprocess" | "reanalyse" | "delete" | "transcript" | "analysis";
+type Mutation = "reprocess" | "reanalyse" | "translation" | "delete" | "transcript" | "analysis";
 
 const terminalStatuses = new Set(["completed", "failed"]);
 const failureEvents = new Set(["processing_failed"]);
@@ -74,6 +82,15 @@ export function RecordingDetailPage() {
   const [transcript, setTranscript] = useState<TranscriptState>({ kind: "idle" });
   const [analysis, setAnalysis] = useState<AnalysisState>({ kind: "idle" });
   const [transcriptDraft, setTranscriptDraft] = useState<TranscriptResponse | null>(null);
+  const [transcriptRefreshKey, setTranscriptRefreshKey] = useState(0);
+  const wasTranslating = useRef(false);
+
+  // Analysis and translation both keep running after a recording is otherwise
+  // finished, so polling has to stay awake for either of them.
+  const sideJobActive =
+    (status?.job?.kind === "analysis" || status?.job?.kind === "translation") &&
+    (status.job.status === "queued" || status.job.status === "processing");
+
   const [analysisDraft, setAnalysisDraft] = useState<AnalysisResultV2 | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -260,10 +277,7 @@ export function RecordingDetailPage() {
   }, [handleRequestError, id]);
 
   useEffect(() => {
-    const analysisJobActive =
-      status?.job?.kind === "analysis" &&
-      (status.job.status === "queued" || status.job.status === "processing");
-    if (!status || (terminalStatuses.has(status.status) && !analysisJobActive)) return undefined;
+    if (!status || (terminalStatuses.has(status.status) && !sideJobActive)) return undefined;
     const interval = window.setInterval(() => {
       void refreshLiveData()
         .then(() => {
@@ -273,7 +287,22 @@ export function RecordingDetailPage() {
         .catch(handleRequestError);
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [handleRequestError, loadAnalysis, refreshLiveData, status, tab]);
+  }, [handleRequestError, loadAnalysis, refreshLiveData, sideJobActive, status, tab]);
+
+  const translationJobActive =
+    status?.job?.kind === "translation" &&
+    (status.job.status === "queued" || status.job.status === "processing");
+
+  useEffect(() => {
+    if (translationJobActive) {
+      wasTranslating.current = true;
+      return;
+    }
+    if (!wasTranslating.current) return;
+    // The job just finished, so the transcript now carries new sentences.
+    wasTranslating.current = false;
+    setTranscriptRefreshKey((current) => current + 1);
+  }, [translationJobActive]);
 
   useEffect(() => {
     if (tab !== "transcript") return;
@@ -297,7 +326,7 @@ export function RecordingDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, invalidate, navigate, status?.status, t, tab]);
+  }, [id, invalidate, navigate, status?.status, t, tab, transcriptRefreshKey]);
 
   useEffect(() => {
     if (tab === "analysis" && analysis.kind === "idle") void loadAnalysis();
@@ -348,6 +377,23 @@ export function RecordingDetailPage() {
       setMutationMessage(t("detail.reprocessQueued"));
     } catch (caught: unknown) {
       handleMutationError(caught, t("detail.reprocessError"));
+    } finally {
+      setMutationPending(null);
+    }
+  }
+
+  async function handleRetranslate() {
+    setMutationPending("translation");
+    setMutationMessage(null);
+    try {
+      await reprocessTranslation(id);
+      await refreshLiveData();
+      setMutationMessage(t("detail.retranslateQueued"));
+      // The load effect does not watch transcript.kind, so a refresh has to be
+      // asked for explicitly or the panel would sit on its loading state.
+      setTranscriptRefreshKey((current) => current + 1);
+    } catch (caught: unknown) {
+      handleMutationError(caught, t("detail.retranslateError"));
     } finally {
       setMutationPending(null);
     }
@@ -440,6 +486,11 @@ export function RecordingDetailPage() {
   // string missing from the map, so edited lines simply lose their reading
   // until the save round-trips.
   const transcriptReadings = transcript.kind === "ready" ? transcript.data.furigana : undefined;
+  // A sentence can span several segments, so its Cantonese line is rendered
+  // after the last one it covers.
+  const translationsByLastSegment = new Map(
+    (shownTranscript?.translations ?? []).map((item) => [item.end_segment_id, item]),
+  );
   const shownAnalysisReadings = analysis.kind === "ready" ? analysis.data.furigana : undefined;
 
   return (
@@ -582,6 +633,7 @@ export function RecordingDetailPage() {
                 <button className="button button-secondary" type="button" onClick={() => setTranscriptDraft(null)}>{t("detail.cancel")}</button>
               </> : <>
                 <button className="button button-secondary" type="button" onClick={() => setTranscriptDraft(structuredClone(shownTranscript))}>{t("detail.edit")}</button>
+                <button className="button button-secondary" disabled={mutationPending !== null} type="button" onClick={() => void handleRetranslate()}>{mutationPending === "translation" ? t("detail.retranslating") : t("detail.retranslate")}</button>
                 <button className="button button-secondary" type="button" onClick={() => void copyText("transcript", shownTranscript.text)}>{copied === "transcript" ? t("detail.copied") : t("detail.copyAll")}</button>
               </>}
             </div> : null}
@@ -599,7 +651,7 @@ export function RecordingDetailPage() {
                   <label>{t("detail.endTime")}<input min="0" step="0.001" type="number" value={segment.end_time} onChange={(event) => setTranscriptDraft((current) => current ? { ...current, segments: current.segments.map((item, itemIndex) => itemIndex === index ? { ...item, end_time: Number(event.target.value) } : item) } : current)} /></label>
                 </div>
                 <textarea value={segment.text} onChange={(event) => setTranscriptDraft((current) => current ? { ...current, segments: current.segments.map((item, itemIndex) => itemIndex === index ? { ...item, text: event.target.value } : item) } : current)} />
-              </> : <><div className="segment-meta"><time>{formatTimestamp(segment.start_time)}</time><strong>{segment.speaker_label}</strong>{segment.language ? <span>{segment.language.toUpperCase()}</span> : null}{segment.has_overlap ? <span className="overlap-label">{t("detail.overlap")}</span> : null}</div><p><Furigana text={segment.text} readings={transcriptReadings} /></p></>}
+              </> : <><div className="segment-meta"><time>{formatTimestamp(segment.start_time)}</time><strong>{segment.speaker_label}</strong>{segment.language ? <span>{segment.language.toUpperCase()}</span> : null}{segment.has_overlap ? <span className="overlap-label">{t("detail.overlap")}</span> : null}</div><p><Furigana text={segment.text} readings={transcriptReadings} /></p>{renderTranslation(translationsByLastSegment.get(segment.id), t)}</>}
             </li>)}
           </ol> : null}
         </section>
@@ -669,4 +721,18 @@ function formatAnalysisCopy(result: AnalysisResultV2): string {
   const highlights = result.highlights.map((item) => `[${formatTimestamp(item.start_time)}] ${item.original_ja}\n${item.translation_zh_hk}\n${item.reason_ja}\n${item.reason_zh_hk}`).join("\n\n");
   const summary = result.summary ? `${result.summary.ja}\n\n${result.summary.zh_hk}` : "";
   return `${result.description.ja}\n\n${result.description.zh_hk}\n\n${summary}\n\n${tags}\n\n${expressions}\n\n${highlights}`.trim();
+}
+
+
+function renderTranslation(
+  translation: TranscriptTranslation | undefined,
+  t: (key: TranslationKey) => string,
+) {
+  if (!translation) return null;
+  return (
+    <p className={translation.stale ? "segment-translation is-stale" : "segment-translation"}>
+      {translation.text_zh_hk}
+      {translation.stale ? <small>{t("detail.translationStale")}</small> : null}
+    </p>
+  );
 }

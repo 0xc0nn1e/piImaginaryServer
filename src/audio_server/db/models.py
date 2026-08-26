@@ -50,6 +50,7 @@ class JobStatus(enum.StrEnum):
 class JobKind(enum.StrEnum):
     FULL = "full"
     ANALYSIS = "analysis"
+    TRANSLATION = "translation"
 
 
 class JobStage(enum.StrEnum):
@@ -58,6 +59,7 @@ class JobStage(enum.StrEnum):
     TRANSCRIBING = "transcribing"
     DIARIZING = "diarizing"
     MERGING = "merging"
+    TRANSLATING = "translating"
     ANALYZING = "analyzing"
     COMPLETED = "completed"
 
@@ -129,6 +131,7 @@ class Recording(Base):
     )
     transcript_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     analysis_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    translation_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -140,6 +143,9 @@ class Recording(Base):
         back_populates="recording", cascade="all, delete-orphan"
     )
     transcript_segments: Mapped[list[TranscriptSegment]] = relationship(
+        back_populates="recording", cascade="all, delete-orphan"
+    )
+    translations: Mapped[list[TranscriptTranslation]] = relationship(
         back_populates="recording", cascade="all, delete-orphan"
     )
     analyses: Mapped[list[Analysis]] = relationship(
@@ -156,15 +162,17 @@ class ProcessingJob(Base):
         ),
         CheckConstraint(
             "stage IN ('queued', 'preprocessing', 'transcribing', 'diarizing', "
-            "'merging', 'analyzing', 'completed')",
+            "'merging', 'translating', 'analyzing', 'completed')",
             name="job_stage",
         ),
         CheckConstraint(
             "failed_stage IN ('queued', 'preprocessing', 'transcribing', 'diarizing', "
-            "'merging', 'analyzing', 'completed')",
+            "'merging', 'translating', 'analyzing', 'completed')",
             name="failed_job_stage",
         ),
-        CheckConstraint("kind IN ('full', 'analysis')", name="processing_job_kind"),
+        CheckConstraint(
+            "kind IN ('full', 'analysis', 'translation')", name="processing_job_kind"
+        ),
         Index(
             "ix_processing_jobs_claim",
             "available_at",
@@ -263,6 +271,64 @@ class TranscriptSegment(Base):
 
     recording: Mapped[Recording] = relationship(back_populates="transcript_segments")
     job: Mapped[ProcessingJob] = relationship(back_populates="transcript_segments")
+
+
+class TranslationSource(enum.StrEnum):
+    LLM = "llm"
+    MANUAL = "manual"
+
+
+class TranscriptTranslation(Base):
+    """One Cantonese rendering of one Japanese sentence.
+
+    A sentence usually spans several Whisper segments, so a row is keyed by the
+    first and last segment it covers. Segment ids survive a transcript edit
+    while sequence numbers are rewritten, so ids are what keep a translation
+    attached to the words it was made from.
+    """
+
+    __tablename__ = "transcript_translations"
+    __table_args__ = (
+        CheckConstraint("source IN ('llm', 'manual')", name="translation_source"),
+        UniqueConstraint(
+            "recording_id", "start_segment_id", name="uq_translation_recording_start"
+        ),
+        Index("ix_transcript_translations_recording", "recording_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    recording_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False
+    )
+    start_segment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transcript_segments.id", ondelete="CASCADE"), nullable=False
+    )
+    end_segment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transcript_segments.id", ondelete="CASCADE"), nullable=False
+    )
+    # The Japanese this rendering was made from. A re-transcription replaces
+    # every segment, and this snapshot is the only way to recognise a sentence
+    # that survived and re-attach hand-written work to it.
+    source_ja: Mapped[str] = mapped_column(Text, nullable=False)
+    text_zh_hk: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[TranslationSource] = mapped_column(
+        enum_column(TranslationSource, name="translation_source"),
+        default=TranslationSource.LLM,
+        nullable=False,
+    )
+    # A transcript edit changes the words a translation was made from, so the
+    # old rendering is kept but flagged rather than silently trusted.
+    stale: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    recording: Mapped[Recording] = relationship(back_populates="translations")
 
 
 class Analysis(Base):

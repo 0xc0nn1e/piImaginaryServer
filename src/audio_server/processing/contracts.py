@@ -18,6 +18,7 @@ class ProcessingStage(StrEnum):
     TRANSCRIBING = "transcribing"
     DIARIZING = "diarizing"
     MERGING = "merging"
+    TRANSLATING = "translating"
     ANALYZING = "analyzing"
     COMPLETED = "completed"
 
@@ -180,6 +181,7 @@ class PipelineResult:
     audio: AudioProbe
     transcript: tuple[MergedTranscriptSegment, ...]
     analysis: AnalysisResult
+    translation: TranslationResult | None = None
     transcription_language: str | None = None
     transcription_language_probability: float | None = None
 
@@ -200,6 +202,47 @@ class TranscriptionProvider(Protocol):
 class DiarizationProvider(Protocol):
     def diarize(self, audio_path: Path) -> DiarizationResult:
         """Return anonymous speaker turns for normalized audio."""
+
+
+@dataclass(frozen=True, slots=True)
+class SentenceTranslation:
+    """A Cantonese rendering tied to the segment span it came from."""
+
+    start_sequence: int
+    end_sequence: int
+    source_ja: str
+    text_zh_hk: str
+
+    def __post_init__(self) -> None:
+        if self.end_sequence < self.start_sequence:
+            raise ValueError("translation end cannot precede its start")
+        if not self.source_ja.strip():
+            raise ValueError("translation source text cannot be empty")
+        if not self.text_zh_hk.strip():
+            raise ValueError("translation text cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationResult:
+    status: AnalysisStatus
+    provider: str
+    model: str | None = None
+    translations: tuple[SentenceTranslation, ...] = ()
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class TranslationProvider(Protocol):
+    @property
+    def name(self) -> str:
+        """Stable provider identifier stored with a translation."""
+
+    def translate(
+        self,
+        recording_id: str,
+        segments: Sequence[MergedTranscriptSegment],
+    ) -> TranslationResult:
+        """Render each sentence of a transcript in Cantonese."""
 
 
 class AnalysisProvider(Protocol):

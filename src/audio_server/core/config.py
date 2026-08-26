@@ -102,8 +102,8 @@ class Settings(BaseSettings):
     @classmethod
     def validate_worker_job_kinds(cls, value: str) -> str:
         entries = [item.strip() for item in value.split(",") if item.strip()]
-        if any(entry not in {"full", "analysis"} for entry in entries):
-            raise ValueError("WORKER_JOB_KINDS may only list full and analysis")
+        if any(entry not in {"full", "analysis", "translation"} for entry in entries):
+            raise ValueError("WORKER_JOB_KINDS may only list full, analysis and translation")
         return ",".join(entries)
 
     @field_validator("log_level")

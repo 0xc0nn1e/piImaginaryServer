@@ -448,18 +448,6 @@ export function RecordingsPage() {
                 <div className="recording-card-top">
                   <StatusBadge status={recording.processing_status} />
                   <span>{formatDateTime(recording.started_at, locale)}</span>
-                  <label className="checked-toggle">
-                    <input
-                      type="checkbox"
-                      checked={recording.checked}
-                      disabled={checkPending.has(recording.id)}
-                      onChange={(event) => void toggleChecked(recording.id, event.target.checked)}
-                    />
-                    {t("recordings.checked")}
-                  </label>
-                  {checked !== undefined && recording.checked !== checked ? (
-                    <small className="filtered-out-note">{t("recordings.filteredOut")}</small>
-                  ) : null}
                 </div>
                 <h2>
                   <Link to={`/recordings/${recording.id}`}>{recording.original_filename}</Link>
@@ -480,10 +468,27 @@ export function RecordingsPage() {
                   <dd>{formatBytes(recording.file_size)}</dd>
                 </div>
               </dl>
-              <Link className="card-link" to={`/recordings/${recording.id}`}>
-                <span className="card-link-label">{t("recordings.open")}</span>
-                <span className="card-link-arrow" aria-hidden="true">↗</span>
-              </Link>
+              <div className="recording-card-actions">
+                <div className="checked-control">
+                  <label className="checked-toggle">
+                    <input
+                      type="checkbox"
+                      aria-label={t("recordings.checked")}
+                      checked={recording.checked}
+                      disabled={checkPending.has(recording.id)}
+                      onChange={(event) => void toggleChecked(recording.id, event.target.checked)}
+                    />
+                    <span>{t("recordings.checked")}</span>
+                  </label>
+                  {checked !== undefined && recording.checked !== checked ? (
+                    <small className="filtered-out-note">{t("recordings.filteredOut")}</small>
+                  ) : null}
+                </div>
+                <Link className="card-link" to={`/recordings/${recording.id}`}>
+                  <span className="card-link-label">{t("recordings.open")}</span>
+                  <span className="card-link-arrow" aria-hidden="true">↗</span>
+                </Link>
+              </div>
             </article>
           ))}
         </div>

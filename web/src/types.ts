@@ -1,7 +1,7 @@
 export type RecordingStatus = "uploaded" | "queued" | "processing" | "completed" | "failed";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
-export type JobKind = "full" | "analysis";
+export type JobKind = "full" | "analysis" | "translation";
 
 export type JobStage =
   | "queued"
@@ -134,6 +134,18 @@ export interface TranscriptSegment {
   has_overlap: boolean;
 }
 
+export type TranslationSource = "llm" | "manual";
+
+export interface TranscriptTranslation {
+  id: string;
+  start_segment_id: string;
+  end_segment_id: string;
+  source_ja: string;
+  text_zh_hk: string;
+  source: TranslationSource;
+  stale: boolean;
+}
+
 export interface TranscriptResponse {
   recording_id: string;
   status: RecordingStatus;
@@ -141,6 +153,8 @@ export interface TranscriptResponse {
   text: string;
   segments: TranscriptSegment[];
   furigana: FuriganaMap;
+  translations: TranscriptTranslation[];
+  translation_revision: number;
 }
 
 export type AnalysisStatus = "completed" | "skipped" | "failed" | "stale";

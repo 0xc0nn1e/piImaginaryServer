@@ -287,7 +287,7 @@ def _is_browser_recording_mutation(scope: Scope) -> bool:
     return (
         scope.get("method") == "POST"
         and len(parts) == 7
-        and parts[-2:] == ["analysis", "reprocess"]
+        and parts[-2:] in (["analysis", "reprocess"], ["translation", "reprocess"])
     )
 
 

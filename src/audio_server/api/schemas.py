@@ -15,6 +15,7 @@ from audio_server.db.models import (
     JobStage,
     JobStatus,
     RecordingStatus,
+    TranslationSource,
 )
 
 _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -181,12 +182,26 @@ class TranscriptSegmentResponse(BaseModel):
     has_overlap: bool
 
 
+class TranscriptTranslationResponse(BaseModel):
+    """A Cantonese sentence and the transcript segments it covers."""
+
+    id: uuid.UUID
+    start_segment_id: uuid.UUID
+    end_segment_id: uuid.UUID
+    source_ja: str
+    text_zh_hk: str
+    source: TranslationSource
+    stale: bool
+
+
 class TranscriptResponse(BaseModel):
     recording_id: uuid.UUID
     status: RecordingStatus
     revision: int
     text: str
     segments: list[TranscriptSegmentResponse]
+    translations: list[TranscriptTranslationResponse] = Field(default_factory=list)
+    translation_revision: int = 0
     furigana: FuriganaMap = Field(default_factory=dict)
 
 

@@ -34,6 +34,7 @@ from audio_server.db.models import (
     Recording,
     RecordingStatus,
     TranscriptSegment,
+    TranscriptTranslation,
 )
 from audio_server.processing.contracts import AudioPreprocessor, AudioProbe
 from audio_server.processing.errors import (
@@ -504,6 +505,19 @@ class RecordingService:
                 segment.confidence = None
                 segment.has_overlap = overlaps[sequence]
             recording.transcript_revision += 1
+            translations = list(
+                session.scalars(
+                    select(TranscriptTranslation)
+                    .where(TranscriptTranslation.recording_id == recording_id)
+                    .with_for_update()
+                )
+            )
+            if translations:
+                # The words a translation was made from just changed, so the
+                # old rendering is flagged rather than deleted or trusted.
+                for translation in translations:
+                    translation.stale = True
+                recording.translation_revision += 1
             analysis = session.scalar(
                 select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
             )
@@ -624,6 +638,26 @@ class RecordingService:
             disallowed_message="Analysis can be queued after transcription completes.",
             kind=JobKind.ANALYSIS,
         )
+
+    def reprocess_translation(self, recording_id: uuid.UUID) -> ProcessingJob:
+        return self._enqueue_processing(
+            recording_id,
+            allowed_statuses=frozenset({RecordingStatus.COMPLETED}),
+            disallowed_code="translation_not_reprocessable",
+            disallowed_message="Translation can be queued after transcription completes.",
+            kind=JobKind.TRANSLATION,
+            require_transcript=True,
+        )
+
+    def list_translations(self, recording_id: uuid.UUID) -> list[TranscriptTranslation]:
+        with self._session_factory() as session:
+            return list(
+                session.scalars(
+                    select(TranscriptTranslation)
+                    .where(TranscriptTranslation.recording_id == recording_id)
+                    .order_by(TranscriptTranslation.created_at, TranscriptTranslation.id)
+                )
+            )
 
     def delete_recording(self, recording_id: uuid.UUID) -> None:
         """Delete terminal recording data with a reversible local-file handoff."""
