@@ -98,6 +98,7 @@ export function RecordingDetailPage() {
     { revision: number; values: Record<string, string> } | null
   >(null);
   const wasTranslating = useRef(false);
+  const editing = useRef(false);
 
   // Analysis and translation both keep running after a recording is otherwise
   // finished, so polling has to stay awake for either of them.
@@ -303,6 +304,10 @@ export function RecordingDetailPage() {
     return () => window.clearInterval(interval);
   }, [handleRequestError, loadAnalysis, refreshLiveData, sideJobActive, status, tab]);
 
+  useEffect(() => {
+    editing.current = transcriptDraft !== null || translationDraft !== null;
+  }, [transcriptDraft, translationDraft]);
+
   const translationJobActive =
     status?.job?.kind === "translation" &&
     (status.job.status === "queued" || status.job.status === "processing");
@@ -320,6 +325,11 @@ export function RecordingDetailPage() {
 
   useEffect(() => {
     if (tab !== "transcript" && tab !== "translations") return;
+    // An open editor holds unsaved words. A background refresh would replace the
+    // rows they are keyed to and the typing would vanish with no way to notice.
+    // A ref, not a dependency: closing the editor must not itself refetch, or a
+    // save would be overwritten by the response it just replaced.
+    if (editing.current) return;
     let cancelled = false;
     setTranscript({ kind: "loading" });
     void getTranscript(id)
@@ -709,13 +719,14 @@ export function RecordingDetailPage() {
             {shownTranscript?.translations.length ? <div className="inline-actions">
               {translationDraft ? <>
                 <button className="button" disabled={mutationPending !== null} type="button" onClick={() => void saveTranslations()}>{mutationPending === "translations" ? t("detail.saving") : t("detail.save")}</button>
-                <button className="button button-secondary" type="button" onClick={() => setTranslationDraft(null)}>{t("detail.cancel")}</button>
+                <button className="button button-secondary" type="button" onClick={() => { setTranslationDraft(null); setTranscriptRefreshKey((current) => current + 1); }}>{t("detail.cancel")}</button>
               </> : <button className="button button-secondary" type="button" onClick={() => setTranslationDraft({ revision: shownTranscript.translation_revision, values: {} })}>{t("detail.edit")}</button>}
             </div> : null}
           </div>
           {transcript.kind === "loading" || transcript.kind === "idle" ? <LoadingView label={t("detail.transcriptLoading")} /> : null}
           {transcript.kind === "error" ? <div className="notice notice-error" role="alert">{transcript.message}</div> : null}
           {shownTranscript && shownTranscript.translations.length === 0 && transcript.kind === "ready" ? <div className="empty-state compact-empty"><h3>{t("detail.noTranslations")}</h3><p>{t("detail.noTranslationsDescription")}</p></div> : null}
+          {translationDraft && translationJobActive ? <div className="notice notice-action" role="status">{t("detail.translationsHeld")}</div> : null}
           {shownTranscript?.translations.length ? (
             <ol className="translation-list">
               {shownTranscript.translations.map((item) => (

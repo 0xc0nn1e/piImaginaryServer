@@ -782,3 +782,79 @@ describe("guarding a translation edit against concurrent writes", () => {
     expect(captured[0].expected_revision).toBe(3);
   });
 });
+
+describe("protecting an open translation editor", () => {
+  it("keeps unsaved words when a reprocess lands mid-edit", async () => {
+    const before = {
+      id: "translation-1",
+      start_segment_id: "segment-1",
+      end_segment_id: "segment-1",
+      source_ja: "行きました。",
+      text_zh_hk: "機器譯文",
+      source: "llm",
+      stale: false,
+    };
+    // Reprocessing rebuilds every row, so the ids the draft is keyed to are gone.
+    const after = { ...before, id: "translation-9", text_zh_hk: "新機器譯文" };
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 1,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [before],
+      translation_revision: 3,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    let rebuilt = false;
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/transcript")) {
+        return Promise.resolve(
+          jsonResponse(
+            rebuilt
+              ? { ...transcript, translations: [after], translation_revision: 4 }
+              : transcript,
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+    await screen.findByText("機器譯文");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    const field = screen.getAllByRole("textbox", { name: "廣東話譯文" })[0];
+    await browser.clear(field);
+    await browser.type(field, "我打緊嘅字");
+
+    // A job finishes and rewrites every translation row behind the editor.
+    rebuilt = true;
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+
+    // The draft is keyed by row id, so a refresh here would blank the field
+    // and the typing would be gone with nothing on screen to show it happened.
+    expect(screen.getAllByRole("textbox", { name: "廣東話譯文" })[0]).toHaveValue("我打緊嘅字");
+  });
+});
