@@ -409,17 +409,16 @@ export function RecordingDetailPage() {
   async function saveTranslations() {
     if (!translationDraft || !shownTranscript) return;
     const edited = shownTranscript.translations
-      .filter(
-        (item) =>
-          item.start_segment_id !== null &&
-          (translationDraft.values[item.id] ?? item.text_zh_hk) !== item.text_zh_hk,
-      )
+      // A row is sent when it was opened, not only when it was retyped.
+      // Confirming that a stale rendering still reads correctly is the whole
+      // point of the editor, and it clears the flag and refreshes the snapshot.
+      .filter((item) => item.start_segment_id !== null && item.id in translationDraft.values)
       .map((item) => ({
         start_segment_id: item.start_segment_id as string,
         text_zh_hk: translationDraft.values[item.id] ?? item.text_zh_hk,
       }));
     if (!edited.length) {
-      setTranslationDraft(null);
+      setMutationMessage(t("detail.translationsUntouched"));
       return;
     }
     setMutationPending("translations");
@@ -737,6 +736,16 @@ export function RecordingDetailPage() {
                     <textarea
                       aria-label={t("detail.translationField")}
                       rows={2}
+                      onFocus={() =>
+                        setTranslationDraft((current) =>
+                          current && !(item.id in current.values)
+                            ? {
+                                ...current,
+                                values: { ...current.values, [item.id]: item.text_zh_hk },
+                              }
+                            : current,
+                        )
+                      }
                       value={translationDraft.values[item.id] ?? item.text_zh_hk}
                       onChange={(event) =>
                         setTranslationDraft((current) =>

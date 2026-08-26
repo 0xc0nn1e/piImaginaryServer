@@ -858,3 +858,78 @@ describe("protecting an open translation editor", () => {
     expect(screen.getAllByRole("textbox", { name: "廣東話譯文" })[0]).toHaveValue("我打緊嘅字");
   });
 });
+
+describe("confirming a stale translation without retyping it", () => {
+  it("clears the stale flag when the reviewer opens the field and saves", async () => {
+    const stale = {
+      id: "translation-1",
+      start_segment_id: "segment-1",
+      end_segment_id: "segment-1",
+      source_ja: "行きました。",
+      text_zh_hk: "去咗。",
+      source: "manual",
+      stale: true,
+    };
+    const transcript = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 2,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "行きました。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [stale],
+      translation_revision: 5,
+      furigana: {},
+    };
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    const captured: { translations?: unknown[] }[] = [];
+    const base = mockDetailApi(jsonResponse(transcript));
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/translations") && init?.method === "PUT") {
+        captured.push(JSON.parse(String(init.body)));
+        return Promise.resolve(
+          jsonResponse({
+            ...transcript,
+            translation_revision: 6,
+            translations: [{ ...stale, stale: false }],
+          }),
+        );
+      }
+      if (path.endsWith("/transcript")) return Promise.resolve(jsonResponse(transcript));
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "廣東話譯文" }));
+    await screen.findByText("去咗。");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    // The reviewer reads the sentence, decides the wording still holds, and
+    // saves without retyping it.
+    await browser.click(screen.getAllByRole("textbox", { name: "廣東話譯文" })[0]);
+    await browser.click(screen.getByRole("button", { name: "儲存" }));
+
+    // Requiring a text change would leave the row stale forever, and a later
+    // reprocess would then fail to recognise it.
+    await waitFor(() => expect(captured).toHaveLength(1));
+    expect(captured[0].translations).toEqual([
+      { start_segment_id: "segment-1", text_zh_hk: "去咗。" },
+    ]);
+  });
+});
