@@ -739,7 +739,7 @@ export function RecordingDetailPage() {
                   <label>{t("detail.endTime")}<input min="0" step="0.001" type="number" value={segment.end_time} onChange={(event) => setTranscriptDraft((current) => current ? { ...current, segments: current.segments.map((item, itemIndex) => itemIndex === index ? { ...item, end_time: Number(event.target.value) } : item) } : current)} /></label>
                 </div>
                 <textarea value={segment.text} onChange={(event) => setTranscriptDraft((current) => current ? { ...current, segments: current.segments.map((item, itemIndex) => itemIndex === index ? { ...item, text: event.target.value } : item) } : current)} />
-              </> : <><div className="segment-meta"><time>{formatTimestamp(segment.start_time)}</time><strong>{segment.speaker_label}</strong>{segment.language ? <span>{segment.language.toUpperCase()}</span> : null}{segment.has_overlap ? <span className="overlap-label">{t("detail.overlap")}</span> : null}</div><p><Furigana text={segment.text} readings={transcriptReadings} /></p>{renderTranslation(translationsByLastSegment.get(segment.id), t)}</>}
+              </> : <><div className="segment-meta"><time>{formatTimestamp(segment.start_time)}</time><strong>{segment.speaker_label}</strong>{segment.language ? <span>{segment.language.toUpperCase()}</span> : null}{segment.has_overlap ? <span className="overlap-label">{t("detail.overlap")}</span> : null}</div><div className="segment-body"><p><Furigana text={segment.text} readings={transcriptReadings} /></p>{renderTranslation(translationsByLastSegment.get(segment.id), t)}</div></>}
             </li>)}
           </ol> : null}
         </section>

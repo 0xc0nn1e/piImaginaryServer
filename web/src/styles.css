@@ -1854,6 +1854,14 @@ select {
   background: var(--amber-soft);
 }
 
+/* The segment row is a two column grid, so the Japanese line and its Cantonese
+   translation share the second column. Without this wrapper the translation is
+   auto-placed into the next row of the meta column and lines up under the
+   speaker instead of under the words it translates. */
+.segment-body {
+  min-width: 0;
+}
+
 .transcript-list p {
   margin: 0;
   color: #e6e4ea;
@@ -2526,16 +2534,13 @@ blockquote:has(ruby),
 }
 
 .segment-translation {
-  margin: 6px 0 0;
-  padding-left: 10px;
-  border-left: 2px solid rgb(189 124 255 / 35%);
+  margin: 7px 0 0;
   color: var(--muted-strong);
   font-size: 0.9rem;
   line-height: 1.6;
 }
 
 .segment-translation.is-stale {
-  border-left-color: rgb(255 190 90 / 45%);
   opacity: 0.75;
 }
 
@@ -2544,6 +2549,12 @@ blockquote:has(ruby),
   margin-top: 2px;
   color: var(--muted);
   font-size: 0.7rem;
+}
+
+/* Only the transcript drops the quote bar, so that the Cantonese lines up with
+   the Japanese above it. There the note below carries the stale marker. */
+.segment-body .segment-translation.is-stale small {
+  color: var(--amber);
 }
 
 .translation-list {
@@ -2576,6 +2587,12 @@ blockquote:has(ruby),
 
 .translation-list .segment-translation {
   margin: 0;
+  padding-left: 10px;
+  border-left: 2px solid rgb(189 124 255 / 35%);
+}
+
+.translation-list .segment-translation.is-stale {
+  border-left-color: rgb(255 190 90 / 45%);
 }
 
 .translation-origin {

@@ -435,6 +435,9 @@ describe("Cantonese translations under the transcript", () => {
     expect(line.closest("li")).toHaveTextContent("行きました。");
     expect(line.closest("li")).not.toHaveTextContent("昨日は");
     expect(line).not.toHaveClass("is-stale");
+    // The translation shares the text column with the Japanese it sits under,
+    // instead of being auto-placed into the speaker column of the segment grid.
+    expect(line.closest(".segment-body")).toHaveTextContent("行きました。");
   });
 
   it("marks a translation stale once the transcript has been edited", async () => {
