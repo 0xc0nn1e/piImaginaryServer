@@ -14,7 +14,9 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session, sessionmaker
 
 from audio_server.db.activity_models import ProcessingActivity
@@ -37,6 +39,7 @@ from audio_server.jobs.queue import (
 )
 from audio_server.processing.contracts import AnalysisResult, DailyRecordingDigest
 from audio_server.processing.contracts import AnalysisStatus as PipelineAnalysisStatus
+from audio_server.processing.errors import PermanentProcessingError
 from audio_server.services.daily_service import (
     DailyService,
     DailyServiceError,
@@ -359,6 +362,110 @@ class TestWorkerHandling:
             assert summary is not None
             assert summary.result is not None
             assert summary.result["overview"]["ja"] == "前の要約。"
+
+
+class TestDeletedRecordings:
+    def test_deleting_a_recording_removes_its_day_summary(
+        self, app_client: TestClient
+    ) -> None:
+        # The summary is written from that day's analyses, so leaving it in
+        # place would keep describing audio the administrator just erased.
+        session_factory = app_client.app.state.test_session_factory
+        recording_id = _seed_recording(
+            session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+        )
+        with session_factory.begin() as session:
+            session.add(
+                DailySummary(
+                    summary_date=date(2026, 8, 27),
+                    provider="stub",
+                    status=AnalysisStatus.COMPLETED,
+                    result={
+                        "overview": {"ja": "会議の一日。", "zh_hk": "開會嘅一日。"},
+                        "key_points": [
+                            {
+                                "recording_id": str(recording_id),
+                                "ja": "進捗を共有した。",
+                                "zh_hk": "分享咗進度。",
+                            }
+                        ],
+                        "tags": [],
+                    },
+                    source_revisions=[
+                        {"recording_id": str(recording_id), "analysis_revision": 1}
+                    ],
+                )
+            )
+
+        response = app_client.delete(
+            f"/api/v1/recordings/{recording_id}",
+            headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+        )
+
+        assert response.status_code in {200, 204}
+        with session_factory() as session:
+            assert session.scalars(select(DailySummary)).all() == []
+
+    def test_the_write_fence_locks_the_days_recordings(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        # Checking without a lock would only narrow the window: a deletion
+        # committing between the check and the write would put its content
+        # back, and back after that day had already been cleared. Deletion and
+        # re-analysis both take the recording row first, so this must too.
+        service = DailyService(session_factory=session_factory)
+        _seed_recording(session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC))
+        statements: list[Any] = []
+
+        with session_factory() as session:
+            original = session.execute
+
+            def capture(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                statements.append(statement)
+                return original(statement, *args, **kwargs)
+
+            session.execute = capture  # type: ignore[method-assign]
+            service.matches_revisions(session, day=date(2026, 8, 27), revisions=[])
+
+        rendered = [
+            str(statement.compile(dialect=postgresql.dialect())) for statement in statements
+        ]
+        assert any("FOR UPDATE OF recordings" in text for text in rendered)
+
+    def test_a_summary_is_not_written_for_a_day_that_changed_meanwhile(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        # The model works outside the claim transaction, so a recording deleted
+        # while it ran must not come back inside the summary written from it.
+        service = DailyService(session_factory=session_factory)
+        recording_id = _seed_recording(
+            session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+        )
+        processor = PipelineJobProcessor(
+            session_factory=session_factory,
+            storage=None,  # type: ignore[arg-type]
+            daily_summary_provider=StubDailyProvider(),
+            daily_service=service,
+        )
+        with session_factory.begin() as session:
+            create_daily_summary_job(
+                session, summary_date=date(2026, 8, 27), available_at=_AVAILABLE_AT
+            )
+        queue = _queue(session_factory)
+        claim = queue.claim_next(now=datetime(2026, 8, 28, tzinfo=UTC))
+        assert claim is not None
+        persist = processor(claim, lambda stage: None)
+
+        # The recording goes after the model answered but before the write.
+        with session_factory.begin() as session:
+            session.execute(sql_delete(Analysis).where(Analysis.recording_id == recording_id))
+
+        with pytest.raises(PermanentProcessingError) as caught:
+            queue.complete(claim, persist_results=persist)
+
+        assert caught.value.code == "daily_summary_day_changed"
+        with session_factory() as session:
+            assert session.scalars(select(DailySummary)).all() == []
 
 
 class TestStaleness:

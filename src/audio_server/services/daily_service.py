@@ -208,6 +208,26 @@ class DailyService:
         with self._session_factory() as session:
             return self._collect(session, day)
 
+    def matches_revisions(
+        self,
+        session: Session,
+        *,
+        day: date,
+        revisions: Sequence[dict[str, Any]],
+    ) -> bool:
+        """Whether the day still holds exactly the analyses a summary was built from.
+
+        The check locks the day's recordings. Reading them without a lock only
+        narrows the window: a deletion committing between the read and the
+        write would put its content back into the summary, and back after the
+        deletion had already cleared that day. Every writer here takes the
+        recording row first — deletion and re-analysis both do — so taking it
+        too makes the answer hold until this transaction commits.
+        """
+
+        _, current = self._collect(session, day, lock=True)
+        return _revision_key(current) == _revision_key(revisions)
+
     def persist_summary(
         self,
         session: Session,
@@ -240,10 +260,10 @@ class DailyService:
         return summary
 
     def _collect(
-        self, session: Session, day: date
+        self, session: Session, day: date, *, lock: bool = False
     ) -> tuple[list[DailyRecordingDigest], list[dict[str, Any]]]:
         start, end = day_window(day)
-        rows = session.execute(
+        statement = (
             select(Recording, Analysis)
             .join(Analysis, Analysis.recording_id == Recording.id)
             .where(
@@ -252,7 +272,10 @@ class DailyService:
                 Analysis.status == AnalysisStatus.COMPLETED,
             )
             .order_by(Recording.started_at, Recording.id)
-        ).all()
+        )
+        if lock:
+            statement = statement.with_for_update(of=Recording)
+        rows = session.execute(statement).all()
         digests: list[DailyRecordingDigest] = []
         revisions: list[dict[str, Any]] = []
         for index, (recording, analysis) in enumerate(rows):

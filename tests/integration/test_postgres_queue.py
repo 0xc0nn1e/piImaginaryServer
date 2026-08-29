@@ -3,17 +3,20 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 from audio_server.db.models import (
+    Analysis,
+    AnalysisStatus,
     Base,
+    JobKind,
     JobStage,
     JobStatus,
     ProcessingJob,
@@ -29,6 +32,7 @@ from audio_server.jobs.queue import (
     create_processing_job,
     retry_failed_recording,
 )
+from audio_server.services.daily_service import DailyService
 
 pytestmark = pytest.mark.integration
 
@@ -334,3 +338,61 @@ def test_manual_retry_creates_new_job_only_for_failed_recording(
 
     with empty_database() as session, session.begin(), pytest.raises(InvalidRetryStateError):
         retry_failed_recording(session, recording_id=recording_id)
+
+
+def test_day_summary_fence_holds_the_recording_against_a_concurrent_delete(
+    empty_database: sessionmaker[Session],
+) -> None:
+    """The summary write must block a deletion rather than race it.
+
+    Checking the day without a lock only narrows the window: a deletion that
+    commits between the check and the write puts its content back, and back
+    after that day's summary has already been cleared. Deletion takes the
+    recording row first, so the fence has to hold the same row until it
+    commits. ``NOWAIT`` turns "another transaction would block here" into an
+    immediate error, so this asserts the lock without threads or sleeps.
+    """
+
+    day = date(2026, 8, 27)
+    started = datetime(2026, 8, 27, 1, 0, tzinfo=UTC)  # 10:00 in Tokyo.
+    recording = _recording()
+    recording.started_at = started
+    recording.ended_at = started + timedelta(seconds=10)
+    recording.processing_status = RecordingStatus.COMPLETED
+    with empty_database() as session, session.begin():
+        session.add(recording)
+        job = ProcessingJob(
+            recording_id=recording.id,
+            kind=JobKind.FULL,
+            status=JobStatus.COMPLETED,
+            stage=JobStage.COMPLETED,
+            available_at=started,
+        )
+        session.add(job)
+        session.flush()
+        session.add(
+            Analysis(
+                recording_id=recording.id,
+                job_id=job.id,
+                provider="stub",
+                schema_version="2",
+                status=AnalysisStatus.COMPLETED,
+                result={"description": {"ja": "会議。", "zh_hk": "開會。"}},
+            )
+        )
+
+    service = DailyService(session_factory=empty_database)
+    _, revisions = service.collect_digests(day)
+    # The fence locks what its query returns, so a day with nothing to collect
+    # would lock nothing and quietly assert against an empty set.
+    assert revisions
+
+    with empty_database() as holder, holder.begin():
+        assert service.matches_revisions(holder, day=day, revisions=revisions) is True
+
+        # A deletion starting now takes the recording row first, so it would
+        # wait for this transaction instead of racing it.
+        with empty_database() as deleter, deleter.begin(), pytest.raises(OperationalError):
+            deleter.execute(
+                select(Recording).where(Recording.id == recording.id).with_for_update(nowait=True)
+            )

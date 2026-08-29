@@ -727,6 +727,15 @@ When a recording of that day is analysed again, the stored summary is marked
 stale rather than deleted, and the last successful summary is kept until a new
 one succeeds.
 
+Deleting a recording deletes its day's summary along with the recording's
+transcript, analysis, and activity. The summary is written from that day's
+analyses and its overview blends every recording of the day, so it cannot be
+scrubbed line by line; the day can be summarised again from whatever remains.
+For the same reason a summary is written only while the day still holds exactly
+the analyses it was built from, so a recording deleted while the model was
+working cannot reappear inside it. Saved bookmarks remain the one deliberate
+exception that outlives its recording.
+
 ## Speech-to-text strategy
 
 The worker converts supported inputs through ffmpeg and sends the normalized

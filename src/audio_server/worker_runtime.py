@@ -596,6 +596,14 @@ def _daily_summary_persister(
             # Every analysis this day had has since gone. Completing without
             # writing keeps the last summary that did succeed.
             return
+        # The day can change while the model works. A recording deleted in the
+        # meantime must not reappear inside a summary written from it, so the
+        # write only lands while the day still holds what it was built from.
+        if not service.matches_revisions(session, day=day, revisions=revisions):
+            raise PermanentProcessingError(
+                code="daily_summary_day_changed",
+                safe_message="The day changed while it was summarised; ask for it again.",
+            )
         service.persist_summary(session, day=day, result=result, source_revisions=revisions)
 
     return persist

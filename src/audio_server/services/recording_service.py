@@ -28,6 +28,7 @@ from audio_server.db.activity_models import (
 from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
+    DailySummary,
     JobKind,
     JobStage,
     JobStatus,
@@ -45,6 +46,7 @@ from audio_server.processing.errors import (
     RetryableProcessingError,
 )
 from audio_server.services.bookmark_service import detach_recording_bookmarks
+from audio_server.services.daily_service import day_of
 from audio_server.services.storage import (
     StagedDeletion,
     StagedUpload,
@@ -780,6 +782,16 @@ class RecordingService:
                     )
                 )
                 session.execute(sql_delete(Analysis).where(Analysis.recording_id == recording_id))
+                # A day summary is written from that day's analyses, so it can
+                # describe or quote this recording. Its overview blends every
+                # recording of the day and cannot be scrubbed line by line, so
+                # the summary goes with the recording; the day can be
+                # summarised again from whatever remains.
+                session.execute(
+                    sql_delete(DailySummary).where(
+                        DailySummary.summary_date == day_of(recording.started_at)
+                    )
+                )
                 session.execute(
                     sql_delete(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
                 )
