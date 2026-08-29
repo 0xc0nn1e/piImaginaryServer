@@ -258,5 +258,44 @@ class AnalysisProvider(Protocol):
         """Analyze a transcript without depending on transcription internals."""
 
 
+@dataclass(frozen=True, slots=True)
+class DailyRecordingDigest:
+    """One analysed recording of a day, reduced to what a day summary reads.
+
+    The digest is built from the committed analysis only. No audio and no
+    transcript text reaches the day summary, and the model sees ``index``
+    rather than the recording id, so a reply can never invent an identifier.
+    """
+
+    index: int
+    recording_id: str
+    time_label: str
+    description_ja: str
+    description_zh_hk: str
+    summary_ja: str = ""
+    summary_zh_hk: str = ""
+    tags_ja: tuple[str, ...] = ()
+    highlights_ja: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.index < 0:
+            raise ValueError("digest index cannot be negative")
+        if not self.recording_id.strip():
+            raise ValueError("digest recording id cannot be empty")
+
+
+class DailySummaryProvider(Protocol):
+    @property
+    def name(self) -> str:
+        """Stable provider identifier stored with a day summary."""
+
+    def summarize(
+        self,
+        summary_date: str,
+        digests: Sequence[DailyRecordingDigest],
+    ) -> AnalysisResult:
+        """Summarize one day from the analyses its recordings already produced."""
+
+
 StageCallback = Callable[[ProcessingStage], None]
 RecordingIdentifier = str | UUID

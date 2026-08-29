@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from math import isfinite
 from typing import Any
 
@@ -315,6 +315,59 @@ class AnalysisResultV2(BaseModel):
     tags: list[BilingualTag] = Field(max_length=12)
     natural_expressions: list[NaturalExpression] = Field(max_length=20)
     highlights: list[AnalysisHighlight] = Field(max_length=12)
+
+
+class DailyKeyPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Null once the recording a point came from has been deleted; the point
+    # still describes the day, it just no longer links anywhere.
+    recording_id: uuid.UUID | None = None
+    ja: str = Field(min_length=1, max_length=1000)
+    zh_hk: str = Field(min_length=1, max_length=1000)
+
+
+class DailySummaryResultV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overview: BilingualDescription
+    key_points: list[DailyKeyPoint] = Field(max_length=10)
+    tags: list[BilingualTag] = Field(max_length=12)
+
+
+class DayListEntryResponse(BaseModel):
+    day: date
+    recording_count: int
+    analysed_count: int
+    summary_status: AnalysisStatus | None
+    summary_stale: bool
+
+
+class DayListResponse(BaseModel):
+    items: list[DayListEntryResponse]
+    limit: int
+    offset: int
+
+
+class DayDetailResponse(BaseModel):
+    day: date
+    recordings: list[RecordingSummary]
+    analysed_recording_ids: list[uuid.UUID]
+    status: AnalysisStatus | None
+    provider: str | None
+    model: str | None
+    schema_version: str | None
+    summary: DailySummaryResultV1 | None
+    stale: bool
+    job: JobStatusResponse | None = None
+    error: dict[str, str] | None = None
+    furigana: FuriganaMap = Field(default_factory=dict)
+
+
+class DaySummaryQueuedResponse(BaseModel):
+    day: date
+    job_id: uuid.UUID
+    status: JobStatus
 
 
 class AnalysisUpdateRequest(BaseModel):

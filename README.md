@@ -227,7 +227,7 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `FFMPEG_BINARY` / `FFPROBE_BINARY` | executable names | Explicit binary locations when not on `PATH`. |
 | `FFMPEG_TIMEOUT_SECONDS` | `3600` | Upper bound for preprocessing. |
 | `PROCESSING_WORKERS` | `1` | Number of worker processes; each loads its own model copies. |
-| `WORKER_JOB_KINDS` | empty | Job kinds this worker may claim: `full`, `analysis`, or both. Empty means every kind. |
+| `WORKER_JOB_KINDS` | empty | Job kinds this worker may claim: `full`, `analysis`, `translation`, `daily_summary`, or any combination. Empty means every kind. |
 | `PROCESSING_MAX_ATTEMPTS` | `3` | Automatic attempt limit for retryable failures. |
 | `JOB_POLL_SECONDS` | `1` | Delay when no job is available. |
 | `JOB_HEARTBEAT_SECONDS` | `30` | Active-job heartbeat interval. |
@@ -692,15 +692,40 @@ worse. A detached rendering is shown read-only until its words come back.
 `WORKER_JOB_KINDS` restricts which kinds a worker claims. A worker that omits
 `full` never loads Whisper or pyannote, so an analysis-only worker costs a
 process rather than gigabytes of model memory. Compose runs `worker` with
-`full` and `analysis-worker` with `analysis`, which keeps analysis responsive
-while transcription saturates the CPU. Both services build the same
+`full` and `analysis-worker` with `analysis,translation,daily_summary`, which
+keeps the LLM work responsive while transcription saturates the CPU. Both services build the same
 `wave-archive-worker:latest` tag, so one rebuild updates both and neither can
 be left running older code.
 
 Leaving the value empty keeps the original behaviour of one worker claiming
 every kind. Run at least one worker that claims `analysis`, or analyses stay
 queued forever; a Compose deployment that starts only the `worker` service has
-no analysis worker.
+no analysis worker. The same applies to `daily_summary`.
+
+## Day summaries
+
+A day page collects every recording of one **Japan-time** calendar day beside a
+summary written from those recordings' committed analyses. The day boundary is
+Tokyo's rather than UTC's because the audio is Japanese conversation: something
+recorded at 23:30 in Tokyo belongs to that evening. Grouping uses
+`recordings.started_at`, so a recording uploaded weeks late still lands on the
+day it was captured.
+
+The summary is produced by a `daily_summary` job, which is queued only when
+asked for from the day page. It reads the stored analyses and nothing else: no
+audio, no transcript text, and no re-run of Whisper or pyannote. The model sees
+each recording as a number rather than an identifier, and the server resolves
+those numbers back to recordings itself, so an invented reference is dropped
+instead of pointing a key point at the wrong recording.
+
+Unlike recording work, a day summary job is scoped to a date: it carries
+`summary_date` and no `recording_id`, guarded by a partial unique index so one
+day cannot have two summaries queued at once. Processing activity stays a
+per-recording timeline and records nothing for these jobs.
+
+When a recording of that day is analysed again, the stored summary is marked
+stale rather than deleted, and the last successful summary is kept until a new
+one succeeds.
 
 ## Speech-to-text strategy
 

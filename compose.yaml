@@ -180,7 +180,7 @@ services:
     image: wave-archive-worker:latest
     environment:
       <<: *runtime-environment
-      WORKER_JOB_KINDS: analysis,translation
+      WORKER_JOB_KINDS: analysis,translation,daily_summary
       PROCESSING_WORKERS: ${ANALYSIS_WORKERS:-1}
       JOB_POLL_SECONDS: ${JOB_POLL_SECONDS:-1}
       JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-30}

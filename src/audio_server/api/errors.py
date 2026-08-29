@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from audio_server.api.dependencies import AuthenticationError
 from audio_server.services.bookmark_service import BookmarkServiceError
+from audio_server.services.daily_service import DailyServiceError
 from audio_server.services.recording_service import RecordingServiceError
 
 
@@ -39,6 +40,10 @@ def register_error_handlers(app: FastAPI) -> None:
     async def bookmark_error_handler(
         _request: Request, exc: BookmarkServiceError
     ) -> JSONResponse:
+        return _error_response(exc.status_code, exc.code, exc.safe_message)
+
+    @app.exception_handler(DailyServiceError)
+    async def daily_error_handler(_request: Request, exc: DailyServiceError) -> JSONResponse:
         return _error_response(exc.status_code, exc.code, exc.safe_message)
 
     @app.exception_handler(RequestValidationError)

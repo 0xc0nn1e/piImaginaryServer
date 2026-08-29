@@ -97,6 +97,18 @@ export function AppLayout() {
               <small>{t("nav.recordingsSub")}</small>
             </span>
           </NavLink>
+          <NavLink to="/days">
+            <span className="nav-glyph" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+            </span>
+            <span>
+              {t("nav.days")}
+              <small>{t("nav.daysSub")}</small>
+            </span>
+          </NavLink>
           <NavLink to="/queue">
             <span className="nav-glyph" aria-hidden="true">
               <i />

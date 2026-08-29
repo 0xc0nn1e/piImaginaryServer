@@ -2,6 +2,10 @@ import type { JobStatus, RecordingStatus } from "./types";
 import type { Locale } from "./i18n";
 import { translate } from "./i18n";
 
+// Days are grouped by the Japan-time calendar day the audio was recorded on,
+// so a day page shows Japan time and not the viewer's own zone.
+export const DAY_TIMEZONE = "Asia/Tokyo";
+
 export function formatDateTime(value: string | null, locale: Locale): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -9,6 +13,16 @@ export function formatDateTime(value: string | null, locale: Locale): string {
   return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
     timeStyle: "short",
+  }).format(date);
+}
+
+export function formatDayTime(value: string | null, locale: Locale): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(locale, {
+    timeStyle: "short",
+    timeZone: DAY_TIMEZONE,
   }).format(date);
 }
 

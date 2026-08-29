@@ -5,7 +5,8 @@ import shutil
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -31,6 +32,7 @@ from audio_server.jobs.worker import (
 )
 from audio_server.processing.analysis import (
     DisabledAnalysisProvider,
+    DisabledDailySummaryProvider,
     DisabledTranslationProvider,
     LMStudioAnalysisProvider,
     LMStudioSettings,
@@ -39,6 +41,7 @@ from audio_server.processing.audio import AudioProcessor, FFmpegSettings
 from audio_server.processing.contracts import (
     AnalysisProvider,
     AnalysisResult,
+    DailySummaryProvider,
     DiarizationProvider,
     MergedTranscriptSegment,
     PipelineResult,
@@ -48,6 +51,7 @@ from audio_server.processing.contracts import (
 from audio_server.processing.contracts import (
     AnalysisStatus as PipelineAnalysisStatus,
 )
+from audio_server.processing.daily_summary import LMStudioDailySummaryProvider
 from audio_server.processing.diarization import (
     DisabledDiarizationProvider,
     PyannoteDiarizationProvider,
@@ -58,9 +62,26 @@ from audio_server.processing.pipeline import ProcessingPipeline
 from audio_server.processing.sentences import TranscriptSentence, group_sentences
 from audio_server.processing.transcription import FasterWhisperProvider, FasterWhisperSettings
 from audio_server.processing.translation import LMStudioTranslationProvider
+from audio_server.services.daily_service import DailyService
 from audio_server.services.storage import LocalStorageBackend, StorageBackend
 
 logger = logging.getLogger(__name__)
+
+
+def _recording_scope(claim: ClaimedJob) -> uuid.UUID:
+    """Return the recording a job works on.
+
+    Recording work always names its recording. Only a day summary leaves the
+    column empty, and it is dispatched before any of these paths are reached,
+    so an empty one here means a corrupt job rather than a day summary.
+    """
+
+    if claim.recording_id is None:
+        raise PermanentProcessingError(
+            code="recording_scope_missing",
+            safe_message="The processing job does not name a recording.",
+        )
+    return claim.recording_id
 
 
 class PipelineJobProcessor:
@@ -72,18 +93,24 @@ class PipelineJobProcessor:
         pipeline: ProcessingPipeline | None = None,
         analysis_provider: AnalysisProvider | None = None,
         translation_provider: TranslationProvider | None = None,
+        daily_summary_provider: DailySummaryProvider | None = None,
+        daily_service: DailyService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._storage = storage
         self._pipeline = pipeline
         self._analysis_provider = analysis_provider or DisabledAnalysisProvider()
         self._translation_provider = translation_provider or DisabledTranslationProvider()
+        self._daily_summary_provider = daily_summary_provider or DisabledDailySummaryProvider()
+        self._daily_service = daily_service
 
     def __call__(self, claim: ClaimedJob, progress: ProgressCallback) -> ResultPersister:
         if claim.kind is JobKind.ANALYSIS:
             return self._process_analysis(claim)
         if claim.kind is JobKind.TRANSLATION:
             return self._process_translation(claim)
+        if claim.kind is JobKind.DAILY_SUMMARY:
+            return self._process_daily_summary(claim)
         if self._pipeline is None:
             # claim_next is filtered by kind, so this only fires if a worker is
             # misconfigured; fail loudly rather than silently dropping the job.
@@ -91,9 +118,10 @@ class PipelineJobProcessor:
                 code="transcription_worker_unavailable",
                 safe_message="This worker does not process transcription jobs.",
             )
+        recording_id = _recording_scope(claim)
         pipeline = self._pipeline
         with self._session_factory() as session:
-            recording = session.scalar(select(Recording).where(Recording.id == claim.recording_id))
+            recording = session.scalar(select(Recording).where(Recording.id == recording_id))
             if recording is None:
                 raise PermanentProcessingError(
                     code="recording_missing",
@@ -105,7 +133,7 @@ class PipelineJobProcessor:
         try:
             with self._storage.materialize(storage_key) as source_path:
                 result = pipeline.run(
-                    recording_id=claim.recording_id,
+                    recording_id=recording_id,
                     source_path=source_path,
                     work_dir=work_dir,
                     stage_callback=progress,
@@ -124,7 +152,7 @@ class PipelineJobProcessor:
                 logger.warning(
                     "processing workspace cleanup failed",
                     extra={
-                        "recording_id": str(claim.recording_id),
+                        "recording_id": str(recording_id),
                         "job_id": str(claim.id),
                         "error_type": type(exc).__name__,
                     },
@@ -135,8 +163,9 @@ class PipelineJobProcessor:
     def _process_translation(self, claim: ClaimedJob) -> ResultPersister:
         """Read the committed transcript only; never touch audio."""
 
+        recording_id = _recording_scope(claim)
         segments = self._load_transcript(claim)
-        result = self._translation_provider.translate(str(claim.recording_id), segments)
+        result = self._translation_provider.translate(str(recording_id), segments)
         if result.status is PipelineAnalysisStatus.FAILED:
             raise PermanentProcessingError(
                 code=result.error_code or "translation_failed",
@@ -147,11 +176,12 @@ class PipelineJobProcessor:
     def _load_transcript(self, claim: ClaimedJob) -> tuple[MergedTranscriptSegment, ...]:
         """Read the committed transcript for a job that must not touch audio."""
 
+        recording_id = _recording_scope(claim)
         with self._session_factory() as session:
             rows = list(
                 session.scalars(
                     select(TranscriptSegment)
-                    .where(TranscriptSegment.recording_id == claim.recording_id)
+                    .where(TranscriptSegment.recording_id == recording_id)
                     .order_by(TranscriptSegment.sequence)
                 )
             )
@@ -169,9 +199,36 @@ class PipelineJobProcessor:
             for row in rows
         )
 
+    def _process_daily_summary(self, claim: ClaimedJob) -> ResultPersister:
+        """Summarise a day from committed analyses; never reads audio."""
+
+        day = claim.summary_date
+        service = self._daily_service
+        if day is None:
+            raise PermanentProcessingError(
+                code="daily_summary_scope_missing",
+                safe_message="The day summary job does not name a day.",
+            )
+        if service is None:
+            # claim_next filters by kind, so this only fires on a misconfigured
+            # worker; fail loudly rather than silently dropping the job.
+            raise PermanentProcessingError(
+                code="daily_summary_worker_unavailable",
+                safe_message="This worker does not process day summary jobs.",
+            )
+        digests, revisions = service.collect_digests(day)
+        result = self._daily_summary_provider.summarize(day.isoformat(), digests)
+        if result.status is PipelineAnalysisStatus.FAILED:
+            raise PermanentProcessingError(
+                code=result.error_code or "daily_summary_failed",
+                safe_message=result.error_message or "The day summary could not be produced.",
+            )
+        return _daily_summary_persister(service, day, result, revisions)
+
     def _process_analysis(self, claim: ClaimedJob) -> ResultPersister:
+        recording_id = _recording_scope(claim)
         transcript = self._load_transcript(claim)
-        result = self._analysis_provider.analyze(str(claim.recording_id), transcript)
+        result = self._analysis_provider.analyze(str(recording_id), transcript)
         if result.status is PipelineAnalysisStatus.FAILED:
             raise PermanentProcessingError(
                 code=result.error_code or "analysis_failed",
@@ -181,27 +238,29 @@ class PipelineJobProcessor:
 
 
 def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersister:
+    recording_id = _recording_scope(claim)
+
     def persist(session: Session) -> None:
-        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        recording = session.get(Recording, recording_id, with_for_update=True)
         if recording is None:
             raise PermanentProcessingError(
                 code="recording_missing", safe_message="The recording metadata is unavailable."
             )
         # Deleting the segments cascades their translations away, so the
         # administrator's own writing is captured first.
-        preserved = _capture_manual_translations(session, claim.recording_id)
+        preserved = _capture_manual_translations(session, recording_id)
         session.execute(
             delete(TranscriptTranslation).where(
-                TranscriptTranslation.recording_id == claim.recording_id
+                TranscriptTranslation.recording_id == recording_id
             )
         )
         session.execute(
-            delete(TranscriptSegment).where(TranscriptSegment.recording_id == claim.recording_id)
+            delete(TranscriptSegment).where(TranscriptSegment.recording_id == recording_id)
         )
         session.add_all(
             [
                 TranscriptSegment(
-                    recording_id=claim.recording_id,
+                    recording_id=recording_id,
                     job_id=claim.id,
                     sequence=segment.sequence,
                     speaker_label=segment.speaker_label,
@@ -218,11 +277,11 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
         recording.transcript_revision += 1
         analysis_status = AnalysisStatus(result.analysis.status.value)
         analysis = session.scalar(
-            select(Analysis).where(Analysis.recording_id == claim.recording_id).with_for_update()
+            select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
         )
         if analysis is None:
             analysis = Analysis(
-                recording_id=claim.recording_id,
+                recording_id=recording_id,
                 job_id=claim.id,
                 provider=result.analysis.provider,
                 status=analysis_status,
@@ -239,9 +298,9 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
         analysis.completed_at = datetime.now(UTC)
         recording.analysis_revision += 1
         _carry_manual_translations(
-            session, claim.recording_id, result.transcript, preserved
+            session, recording_id, result.transcript, preserved
         )
-        _write_translations(session, claim.recording_id, result.translation)
+        _write_translations(session, recording_id, result.translation)
         recording.translation_revision += 1
 
     return persist
@@ -477,32 +536,36 @@ def _write_translations(
 def _translation_result_persister(
     claim: ClaimedJob, result: TranslationResult
 ) -> ResultPersister:
+    recording_id = _recording_scope(claim)
+
     def persist(session: Session) -> None:
-        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        recording = session.get(Recording, recording_id, with_for_update=True)
         if recording is None:
             raise PermanentProcessingError(
                 code="recording_missing", safe_message="The recording metadata is unavailable."
             )
-        _write_translations(session, claim.recording_id, result)
+        _write_translations(session, recording_id, result)
         recording.translation_revision += 1
 
     return persist
 
 
 def _analysis_result_persister(claim: ClaimedJob, result: AnalysisResult) -> ResultPersister:
+    recording_id = _recording_scope(claim)
+
     def persist(session: Session) -> None:
-        recording = session.get(Recording, claim.recording_id, with_for_update=True)
+        recording = session.get(Recording, recording_id, with_for_update=True)
         if recording is None:
             raise PermanentProcessingError(
                 code="recording_missing", safe_message="The recording metadata is unavailable."
             )
         analysis = session.scalar(
-            select(Analysis).where(Analysis.recording_id == claim.recording_id).with_for_update()
+            select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
         )
         status = AnalysisStatus(result.status.value)
         if analysis is None:
             analysis = Analysis(
-                recording_id=claim.recording_id,
+                recording_id=recording_id,
                 job_id=claim.id,
                 provider=result.provider,
                 status=status,
@@ -518,6 +581,22 @@ def _analysis_result_persister(claim: ClaimedJob, result: AnalysisResult) -> Res
         analysis.error_message = result.error_message
         analysis.completed_at = datetime.now(UTC)
         recording.analysis_revision += 1
+
+    return persist
+
+
+def _daily_summary_persister(
+    service: DailyService,
+    day: date,
+    result: AnalysisResult,
+    revisions: Sequence[dict[str, Any]],
+) -> ResultPersister:
+    def persist(session: Session) -> None:
+        if result.status is PipelineAnalysisStatus.SKIPPED:
+            # Every analysis this day had has since gone. Completing without
+            # writing keeps the last summary that did succeed.
+            return
+        service.persist_summary(session, day=day, result=result, source_revisions=revisions)
 
     return persist
 
@@ -539,16 +618,22 @@ def build_worker(worker_index: int) -> Worker:
     job_kinds = _parse_job_kinds(settings.worker_job_kinds)
     transcribes = job_kinds is None or JobKind.FULL in job_kinds
 
+    daily_service = DailyService(
+        session_factory=database.session_factory,
+        max_attempts=settings.processing_max_attempts,
+    )
+
     def processor_factory() -> JobProcessor:
         analysis_provider = _build_analysis_provider(settings)
         translation_provider = _build_translation_provider(settings)
+        daily_summary_provider = _build_daily_summary_provider(settings)
         if not transcribes:
             # An analysis-only worker must not pay for Whisper and pyannote:
             # loading them would cost gigabytes of memory it never uses.
             load = getattr(analysis_provider, "load", None)
             if callable(load):
                 load()
-            for provider in (analysis_provider, translation_provider):
+            for provider in (analysis_provider, translation_provider, daily_summary_provider):
                 load = getattr(provider, "load", None)
                 if callable(load):
                     load()
@@ -557,6 +642,8 @@ def build_worker(worker_index: int) -> Worker:
                 storage=storage,
                 analysis_provider=analysis_provider,
                 translation_provider=translation_provider,
+                daily_summary_provider=daily_summary_provider,
+                daily_service=daily_service,
             )
         pipeline = _build_pipeline(
             settings,
@@ -570,6 +657,8 @@ def build_worker(worker_index: int) -> Worker:
             pipeline=pipeline,
             analysis_provider=analysis_provider,
             translation_provider=translation_provider,
+            daily_summary_provider=daily_summary_provider,
+            daily_service=daily_service,
         )
 
     return Worker(
@@ -645,6 +734,25 @@ def _build_translation_provider(settings: Settings) -> TranslationProvider:
             safe_message="The configured LLM translation provider is unsupported.",
         )
     return LMStudioTranslationProvider(
+        LMStudioSettings(
+            host=settings.lm_studio_host,
+            api_key=settings.lm_studio_api_key.get_secret_value(),
+            timeout_seconds=settings.lm_studio_timeout_seconds,
+            chunk_chars=settings.lm_studio_chunk_chars,
+            max_tokens=settings.lm_studio_max_tokens,
+        )
+    )
+
+
+def _build_daily_summary_provider(settings: Settings) -> DailySummaryProvider:
+    if not settings.llm_enabled:
+        return DisabledDailySummaryProvider()
+    if settings.llm_provider != "lmstudio":
+        raise ProviderConfigurationError(
+            code="daily_summary_provider_invalid",
+            safe_message="The configured LLM day summary provider is unsupported.",
+        )
+    return LMStudioDailySummaryProvider(
         LMStudioSettings(
             host=settings.lm_studio_host,
             api_key=settings.lm_studio_api_key.get_secret_value(),

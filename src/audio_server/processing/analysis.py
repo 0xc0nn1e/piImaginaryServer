@@ -22,6 +22,7 @@ from audio_server.api.schemas import (
 from audio_server.processing.contracts import (
     AnalysisResult,
     AnalysisStatus,
+    DailyRecordingDigest,
     MergedTranscriptSegment,
     TranslationResult,
 )
@@ -51,6 +52,22 @@ class DisabledAnalysisProvider:
             provider=self.name,
             schema_version=2,
         )
+
+
+class DisabledDailySummaryProvider:
+    """Stands in when no LLM is configured, so a day simply has no summary."""
+
+    @property
+    def name(self) -> str:
+        return "disabled"
+
+    def summarize(
+        self,
+        summary_date: str,
+        digests: Sequence[DailyRecordingDigest],
+    ) -> AnalysisResult:
+        del summary_date, digests
+        return AnalysisResult(status=AnalysisStatus.SKIPPED, provider=self.name)
 
 
 class DisabledTranslationProvider:

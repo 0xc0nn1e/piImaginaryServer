@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./auth/AuthContext";
 import { AppLayout } from "./components/AppLayout";
 import { HomeRedirect, LoginGuard, RequireAuth, SetupGuard } from "./components/RouteGuards";
+import { DayPage } from "./pages/DayPage";
 import { LanguageProvider } from "./i18n";
 import { BookmarksPage } from "./pages/BookmarksPage";
 import { QueuePage } from "./pages/QueuePage";
@@ -43,6 +44,8 @@ export function App() {
             >
               <Route path="/recordings" element={<RecordingsPage />} />
               <Route path="/recordings/:id" element={<RecordingDetailPage />} />
+              <Route path="/days" element={<DayPage />} />
+              <Route path="/days/:day" element={<DayPage />} />
               <Route path="/queue" element={<QueuePage />} />
               <Route path="/bookmarks" element={<BookmarksPage />} />
             </Route>

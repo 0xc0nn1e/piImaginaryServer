@@ -2437,6 +2437,179 @@ blockquote:has(ruby),
   font-size: 0.72rem;
 }
 
+/* Day summary page: the day's recordings sit beside the summary written from
+   their analyses, so one column names what happened and the other reads it. */
+.day-page {
+  display: grid;
+  gap: 14px;
+}
+
+.day-switcher {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.day-timezone {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.button.is-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.day-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 15px;
+  align-items: start;
+}
+
+.day-counts {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.day-recording-list {
+  display: grid;
+  gap: 13px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.day-recording-list li {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.day-recording-list li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.day-recording-list a {
+  display: grid;
+  gap: 3px;
+  text-decoration: none;
+}
+
+.day-recording-list time {
+  color: var(--violet);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+}
+
+.day-recording-name {
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.day-recording-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.day-unanalysed {
+  padding: 2px 6px;
+  border: 1px solid rgb(246 197 111 / 15%);
+  border-radius: 5px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+}
+
+.day-summary {
+  display: grid;
+  gap: 26px;
+}
+
+.day-section {
+  display: grid;
+  gap: 11px;
+}
+
+.day-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 560;
+}
+
+/* The day summary is reading material rather than card chrome, so it drops the
+   note styling the analysis cards use and takes the transcript's scale. */
+.day-section .bilingual-note {
+  padding-top: 0;
+  border-top: 0;
+  color: var(--ink);
+  font-size: 0.94rem;
+  line-height: 1.85;
+}
+
+.day-section .bilingual-note span + span {
+  color: var(--muted-strong);
+}
+
+.day-point-list {
+  display: grid;
+  gap: 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: day-point;
+}
+
+.day-point-list li {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding-left: 28px;
+}
+
+.day-point-list li::before {
+  content: counter(day-point, decimal-leading-zero);
+  counter-increment: day-point;
+  position: absolute;
+  top: 6px;
+  left: 0;
+  color: var(--violet);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+}
+
+.day-point-source {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+}
+
+.day-failure-detail {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  opacity: 0.85;
+}
+
+/* Declared after the two column rule above, because an equal-specificity
+   override placed earlier in the file would lose to it. */
+@media (max-width: 900px) {
+  .day-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
 .queue-help {
   color: var(--muted);
   font-size: 0.8rem;

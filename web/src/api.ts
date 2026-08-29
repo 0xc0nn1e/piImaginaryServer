@@ -6,6 +6,9 @@ import type {
   BookmarkCreateRequest,
   BookmarkKind,
   BookmarkListResponse,
+  DayDetailResponse,
+  DayListResponse,
+  DaySummaryQueuedResponse,
   ProcessingRequestResponse,
   QueueResponse,
   RecordingListResponse,
@@ -145,6 +148,25 @@ export async function deleteBookmark(bookmarkId: string, csrfToken: string) {
   await request<unknown>(`/api/v1/bookmarks/${encodeURIComponent(bookmarkId)}`, {
     method: "DELETE",
     csrfToken,
+  });
+}
+
+export function listDays(params: { limit: number; offset: number }): Promise<DayListResponse> {
+  const query = new URLSearchParams({
+    limit: String(params.limit),
+    offset: String(params.offset),
+  });
+  return request(`/api/v1/days?${query.toString()}`);
+}
+
+export function getDay(day: string): Promise<DayDetailResponse> {
+  return request(`/api/v1/days/${encodeURIComponent(day)}`);
+}
+
+export function reprocessDaySummary(day: string): Promise<DaySummaryQueuedResponse> {
+  return request(`/api/v1/days/${encodeURIComponent(day)}/summary/reprocess`, {
+    method: "POST",
+    csrfToken: requireCsrfCookie(),
   });
 }
 

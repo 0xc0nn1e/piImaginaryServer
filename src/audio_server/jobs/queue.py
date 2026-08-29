@@ -13,7 +13,7 @@ import re
 import uuid
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol, TypeAlias
 
 from sqlalchemy import Select, or_, select, update
@@ -58,13 +58,15 @@ class ClaimedJob:
     """Detached job identity passed to long-running processing code."""
 
     id: uuid.UUID
-    recording_id: uuid.UUID
+    recording_id: uuid.UUID | None
     kind: JobKind
     claim_token: uuid.UUID
     worker_id: str
     attempt_count: int
     max_attempts: int
     stage: JobStage
+    # Set instead of ``recording_id`` for a day summary; the two are exclusive.
+    summary_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +154,52 @@ def _coerce_stage(stage: JobStage | str) -> JobStage:
     return JobStage(value)
 
 
+def _append_job_activity(
+    session: Session,
+    *,
+    recording_id: uuid.UUID | None,
+    job_id: uuid.UUID,
+    job_kind: JobKind,
+    event_type: ProcessingActivityType,
+    job_status: JobStatus | None,
+    stage: JobStage | None,
+    attempt_count: int,
+    max_attempts: int,
+    occurred_at: datetime,
+    error_code: str | None = None,
+    error_type: str | None = None,
+    safe_message: str | None = None,
+    retry_scheduled: bool = False,
+    next_attempt_at: datetime | None = None,
+) -> None:
+    """Append an event to a recording's timeline when the job has a recording.
+
+    Processing activity is the per-recording history shown on a recording page.
+    A day summary is scoped to a date and belongs on no single recording's
+    timeline, so it records nothing here rather than borrowing one.
+    """
+
+    if recording_id is None:
+        return
+    append_activity(
+        session,
+        recording_id=recording_id,
+        job_id=job_id,
+        job_kind=job_kind,
+        event_type=event_type,
+        job_status=job_status,
+        stage=stage,
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
+        occurred_at=occurred_at,
+        error_code=error_code,
+        error_type=error_type,
+        safe_message=safe_message,
+        retry_scheduled=retry_scheduled,
+        next_attempt_at=next_attempt_at,
+    )
+
+
 def _active_job_statement(recording_id: uuid.UUID) -> Select[tuple[ProcessingJob]]:
     return select(ProcessingJob).where(
         ProcessingJob.recording_id == recording_id,
@@ -202,7 +250,7 @@ def create_processing_job(
         recording.processing_status = RecordingStatus.QUEUED
     session.add(job)
     session.flush()
-    append_activity(
+    _append_job_activity(
         session,
         recording_id=recording_id,
         job_id=job.id,
@@ -214,6 +262,51 @@ def create_processing_job(
         max_attempts=max_attempts,
         occurred_at=queued_at,
     )
+    return job
+
+
+def _active_day_job_statement(summary_date: date) -> Select[tuple[ProcessingJob]]:
+    return select(ProcessingJob).where(
+        ProcessingJob.summary_date == summary_date,
+        ProcessingJob.status.in_((JobStatus.QUEUED, JobStatus.PROCESSING)),
+    )
+
+
+def create_daily_summary_job(
+    session: Session,
+    *,
+    summary_date: date,
+    max_attempts: int = 3,
+    available_at: datetime | None = None,
+) -> ProcessingJob:
+    """Queue a day summary inside the caller's existing transaction.
+
+    The job names a date rather than a recording, so nothing here changes any
+    recording status. The partial unique index on ``summary_date`` stays the
+    final guard against two summaries being queued for the same day.
+    """
+
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    queued_at = available_at or _utcnow()
+
+    session.flush()
+    active = session.scalar(_active_day_job_statement(summary_date).limit(1))
+    if active is not None:
+        raise InvalidRetryStateError("day already has an active summary job")
+
+    job = ProcessingJob(
+        recording_id=None,
+        summary_date=summary_date,
+        kind=JobKind.DAILY_SUMMARY,
+        status=JobStatus.QUEUED,
+        stage=JobStage.QUEUED,
+        attempt_count=0,
+        max_attempts=max_attempts,
+        available_at=queued_at,
+    )
+    session.add(job)
+    session.flush()
     return job
 
 
@@ -257,7 +350,7 @@ def retry_failed_recording(
     recording.processing_status = RecordingStatus.QUEUED
     session.add(job)
     session.flush()
-    append_activity(
+    _append_job_activity(
         session,
         recording_id=recording_id,
         job_id=job.id,
@@ -327,7 +420,9 @@ class JobQueue:
 
             job.status = JobStatus.PROCESSING
             job.stage = (
-                JobStage.ANALYZING if job.kind is JobKind.ANALYSIS else JobStage.PREPROCESSING
+                JobStage.ANALYZING
+                if job.kind in {JobKind.ANALYSIS, JobKind.DAILY_SUMMARY}
+                else JobStage.PREPROCESSING
             )
             job.attempt_count += 1
             job.worker_id = self.worker_id
@@ -348,7 +443,7 @@ class JobQueue:
                     .where(Recording.id == job.recording_id)
                     .values(processing_status=RecordingStatus.PROCESSING)
                 )
-            append_activity(
+            _append_job_activity(
                 session,
                 recording_id=job.recording_id,
                 job_id=job.id,
@@ -363,6 +458,7 @@ class JobQueue:
             claimed = ClaimedJob(
                 id=job.id,
                 recording_id=job.recording_id,
+                summary_date=job.summary_date,
                 kind=job.kind,
                 claim_token=token,
                 worker_id=self.worker_id,
@@ -425,7 +521,7 @@ class JobQueue:
             )
             if updated_id is None:
                 raise ClaimLostError("cannot update stage after losing the job lease")
-            append_activity(
+            _append_job_activity(
                 session,
                 recording_id=claim.recording_id,
                 job_id=claim.id,
@@ -464,7 +560,7 @@ class JobQueue:
                     .where(Recording.id == job.recording_id)
                     .values(processing_status=RecordingStatus.COMPLETED)
                 )
-            append_activity(
+            _append_job_activity(
                 session,
                 recording_id=job.recording_id,
                 job_id=job.id,
@@ -517,7 +613,7 @@ class JobQueue:
                         .where(Recording.id == job.recording_id)
                         .values(processing_status=RecordingStatus.QUEUED)
                     )
-                append_activity(
+                _append_job_activity(
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,
@@ -543,7 +639,7 @@ class JobQueue:
                         .where(Recording.id == job.recording_id)
                         .values(processing_status=RecordingStatus.FAILED)
                     )
-                append_activity(
+                _append_job_activity(
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,
@@ -618,7 +714,7 @@ class JobQueue:
                     job.finished_at = recovered_at
                     recording_status = RecordingStatus.FAILED
                     failed += 1
-                append_activity(
+                _append_job_activity(
                     session,
                     recording_id=job.recording_id,
                     job_id=job.id,

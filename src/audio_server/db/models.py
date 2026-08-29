@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -10,6 +10,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -51,6 +52,7 @@ class JobKind(enum.StrEnum):
     FULL = "full"
     ANALYSIS = "analysis"
     TRANSLATION = "translation"
+    DAILY_SUMMARY = "daily_summary"
 
 
 class JobStage(enum.StrEnum):
@@ -171,7 +173,16 @@ class ProcessingJob(Base):
             name="failed_job_stage",
         ),
         CheckConstraint(
-            "kind IN ('full', 'analysis', 'translation')", name="processing_job_kind"
+            "kind IN ('full', 'analysis', 'translation', 'daily_summary')",
+            name="processing_job_kind",
+        ),
+        # A job is scoped to exactly one thing. Recording work names its
+        # recording; a day summary names its day and belongs to no single
+        # recording, so the two columns are mutually exclusive.
+        CheckConstraint(
+            "(recording_id IS NOT NULL AND summary_date IS NULL) OR "
+            "(recording_id IS NULL AND summary_date IS NOT NULL)",
+            name="processing_job_scope",
         ),
         Index(
             "ix_processing_jobs_claim",
@@ -194,12 +205,21 @@ class ProcessingJob(Base):
             postgresql_where=text("status IN ('queued', 'processing')"),
             sqlite_where=text("status IN ('queued', 'processing')"),
         ),
+        Index(
+            "uq_processing_jobs_one_active_day",
+            "summary_date",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'processing')"),
+            sqlite_where=text("status IN ('queued', 'processing')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    recording_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False
+    recording_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recordings.id", ondelete="CASCADE")
     )
+    # The Japan-time calendar day a summary job covers; NULL for recording work.
+    summary_date: Mapped[date | None] = mapped_column(Date)
     kind: Mapped[JobKind] = mapped_column(
         enum_column(JobKind, name="processing_job_kind"),
         default=JobKind.FULL,
@@ -238,7 +258,7 @@ class ProcessingJob(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    recording: Mapped[Recording] = relationship(back_populates="jobs")
+    recording: Mapped[Recording | None] = relationship(back_populates="jobs")
     transcript_segments: Mapped[list[TranscriptSegment]] = relationship(back_populates="job")
     analyses: Mapped[list[Analysis]] = relationship(back_populates="job")
 
@@ -416,4 +436,44 @@ class Bookmark(Base):
     source_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class DailySummary(Base):
+    """One LLM summary covering every analysed recording of a calendar day.
+
+    The day is a Japan-time calendar date because the audio is Japanese
+    conversation: a recording made at 23:30 in Tokyo belongs to that evening,
+    not to the previous UTC day.
+    """
+
+    __tablename__ = "daily_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('completed', 'skipped', 'failed', 'stale')",
+            name="daily_summary_status",
+        ),
+        UniqueConstraint("summary_date", name="uq_daily_summaries_date"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    summary_date: Mapped[date] = mapped_column(Date, nullable=False)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    model: Mapped[str | None] = mapped_column(String(128))
+    schema_version: Mapped[str] = mapped_column(String(32), default="1", nullable=False)
+    status: Mapped[AnalysisStatus] = mapped_column(
+        enum_column(AnalysisStatus, name="daily_summary_status"), nullable=False
+    )
+    result: Mapped[dict[str, Any] | None] = mapped_column(json_type)
+    # The ``analysis_revision`` each recording carried when this summary was
+    # written. A difference means the day has moved on and the summary is
+    # stale, which is shown rather than silently discarded.
+    source_revisions: Mapped[list[dict[str, Any]]] = mapped_column(json_type, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

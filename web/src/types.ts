@@ -1,7 +1,7 @@
 export type RecordingStatus = "uploaded" | "queued" | "processing" | "completed" | "failed";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed";
-export type JobKind = "full" | "analysis" | "translation";
+export type JobKind = "full" | "analysis" | "translation" | "daily_summary";
 
 export type JobStage =
   | "queued"
@@ -52,6 +52,53 @@ export interface RecordingListResponse {
   items: RecordingSummary[];
   limit: number;
   offset: number;
+}
+
+export interface DailyKeyPoint {
+  recording_id: string | null;
+  ja: string;
+  zh_hk: string;
+}
+
+export interface DailySummaryResult {
+  overview: BilingualText;
+  key_points: DailyKeyPoint[];
+  tags: BilingualTag[];
+}
+
+export interface DayListEntry {
+  day: string;
+  recording_count: number;
+  analysed_count: number;
+  summary_status: AnalysisStatus | null;
+  summary_stale: boolean;
+}
+
+export interface DayListResponse {
+  items: DayListEntry[];
+  limit: number;
+  offset: number;
+}
+
+export interface DayDetailResponse {
+  day: string;
+  recordings: RecordingSummary[];
+  analysed_recording_ids: string[];
+  status: AnalysisStatus | null;
+  provider: string | null;
+  model: string | null;
+  schema_version: string | null;
+  summary: DailySummaryResult | null;
+  stale: boolean;
+  job: JobStatusDetails | null;
+  error: { code: string; message: string } | null;
+  furigana: FuriganaMap;
+}
+
+export interface DaySummaryQueuedResponse {
+  day: string;
+  job_id: string;
+  status: JobStatus;
 }
 
 export interface JobError {

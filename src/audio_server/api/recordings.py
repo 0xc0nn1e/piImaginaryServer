@@ -134,7 +134,7 @@ def get_recording_status(
     service: Annotated[RecordingService, Depends(get_recording_service)],
 ) -> RecordingStatusResponse:
     recording, job = service.get_status(recording_id)
-    job_response = None
+    job_status = None
     if job is not None:
         error = None
         if job.error_code and job.error_message:
@@ -145,11 +145,11 @@ def get_recording_status(
                 stage=job.failed_stage,
                 at=job.error_at,
             )
-        job_response = _job_response(job, error=error)
+        job_status = job_response(job, error=error)
     return RecordingStatusResponse(
         recording_id=recording.id,
         status=recording.processing_status,
-        job=job_response,
+        job=job_status,
     )
 
 
@@ -206,7 +206,7 @@ def get_analysis(
         schema_version=analysis.schema_version,
         revision=recording.analysis_revision,
         result=structured,
-        job=_job_response(analysis_job) if analysis_job is not None else None,
+        job=job_response(analysis_job) if analysis_job is not None else None,
         error=error,
         furigana=_analysis_furigana(structured),
     )
@@ -372,7 +372,7 @@ def _format_transcript(segments: list[TranscriptSegmentResponse]) -> str:
     return "\n\n".join(lines)
 
 
-def _job_response(job: ProcessingJob, *, error: JobError | None = None) -> JobStatusResponse:
+def job_response(job: ProcessingJob, *, error: JobError | None = None) -> JobStatusResponse:
     if error is None and job.error_code and job.error_message:
         error = JobError(
             code=job.error_code,
