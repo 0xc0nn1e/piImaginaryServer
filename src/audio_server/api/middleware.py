@@ -120,6 +120,7 @@ class ApiRequestGuardMiddleware:
             or _is_bookmark_path(scope)
             or _is_browser_read(scope)
             or _is_browser_recording_mutation(scope)
+            or _is_browser_day_mutation(scope)
         ):
             await self._handle_limited_request(scope, receive, send, self._mutation_limit)
             return
@@ -268,6 +269,21 @@ def _is_browser_read(scope: Scope) -> bool:
         path == "/api/v1/recordings"
         or path.startswith("/api/v1/recordings/")
         or path == "/api/v1/queue"
+        or path == "/api/v1/days"
+        or path.startswith("/api/v1/days/")
+    )
+
+
+def _is_browser_day_mutation(scope: Scope) -> bool:
+    """Only asking for a day summary; the day itself is never edited here."""
+
+    path = str(scope.get("path", "")).rstrip("/")
+    parts = path.split("/")
+    return (
+        scope.get("method") == "POST"
+        and parts[:4] == ["", "api", "v1", "days"]
+        and len(parts) == 7
+        and parts[-2:] == ["summary", "reprocess"]
     )
 
 

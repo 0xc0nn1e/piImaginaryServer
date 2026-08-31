@@ -365,3 +365,55 @@ def test_browser_mutations_require_exact_origin_and_csrf(
     assert no_origin.json()["error"]["code"] == "origin_not_allowed"
     assert wrong_csrf.status_code == 403
     assert wrong_csrf.json()["error"]["code"] == "csrf_validation_failed"
+
+
+def test_browser_session_can_open_a_day_page(
+    app_client: TestClient,
+    wav_bytes: bytes,
+) -> None:
+    """A day belongs to the browser UI, so a session alone has to reach it.
+
+    Every private path outside the browser allowlist demands a bearer token, so
+    a day left out of it answers 401 and the page signs the administrator out
+    on the way in.
+    """
+
+    _setup_and_login(app_client)
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    day = metadata["recording_start_time"][:10]
+
+    listing = app_client.get("/api/v1/days")
+    detail = app_client.get(f"/api/v1/days/{day}")
+
+    assert listing.status_code == 200
+    assert listing.headers["cache-control"] == "no-store"
+    assert detail.status_code == 200
+    assert [item["id"] for item in detail.json()["recordings"]] == [metadata["id"]]
+
+
+def test_browser_day_summary_request_needs_origin_and_csrf(
+    app_client: TestClient,
+    wav_bytes: bytes,
+) -> None:
+    _setup_and_login(app_client)
+    files, headers, metadata = make_upload(wav_bytes)
+    assert app_client.post("/api/v1/recordings", files=files, headers=headers).status_code == 201
+    day = metadata["recording_start_time"][:10]
+    csrf_token = app_client.cookies.get("audio_server_csrf")
+    assert csrf_token
+
+    no_origin = app_client.post(
+        f"/api/v1/days/{day}/summary/reprocess", headers={"X-CSRF-Token": csrf_token}
+    )
+    allowed = app_client.post(
+        f"/api/v1/days/{day}/summary/reprocess",
+        headers={"Origin": ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+
+    assert no_origin.status_code == 403
+    assert no_origin.json()["error"]["code"] == "origin_not_allowed"
+    # Authenticated and accepted by the guard; the day simply has no analysis
+    # to summarise yet, which is a business answer rather than a 401.
+    assert allowed.status_code == 409
+    assert allowed.json()["error"]["code"] == "daily_summary_not_available"
