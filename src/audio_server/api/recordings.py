@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Header, Query, Response, UploadFile
@@ -93,9 +94,15 @@ def list_recordings(
     device_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
     status: Annotated[RecordingStatus | None, Query()] = None,
     checked: Annotated[bool | None, Query()] = None,
+    day: Annotated[date | None, Query()] = None,
 ) -> RecordingListResponse:
     recordings = service.list_recordings(
-        limit=limit, offset=offset, device_id=device_id, status=status, checked=checked
+        limit=limit,
+        offset=offset,
+        device_id=device_id,
+        status=status,
+        checked=checked,
+        day=day,
     )
     return RecordingListResponse(
         items=[RecordingSummary.model_validate(recording) for recording in recordings],

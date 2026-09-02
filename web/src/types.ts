@@ -84,6 +84,7 @@ export interface DayDetailResponse {
   day: string;
   recordings: RecordingSummary[];
   analysed_recording_ids: string[];
+  active_job_recording_ids: string[];
   status: AnalysisStatus | null;
   provider: string | null;
   model: string | null;
@@ -99,6 +100,12 @@ export interface DaySummaryQueuedResponse {
   day: string;
   job_id: string;
   status: JobStatus;
+}
+
+export interface DayAnalysisQueuedResponse {
+  day: string;
+  queued_recording_ids: string[];
+  skipped: number;
 }
 
 export interface JobError {

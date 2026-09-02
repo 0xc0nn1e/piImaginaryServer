@@ -101,6 +101,11 @@ class Recording(Base):
         UniqueConstraint("device_id", "sha256", name="uq_recordings_device_sha256"),
         UniqueConstraint("storage_key", name="uq_recordings_storage_key"),
         Index("ix_recordings_created_at", "created_at"),
+        # Every day-scoped read filters on a started_at range: the day pages,
+        # the digests a day summary is built from, and the recording list's
+        # day filter. The existing indexes are all on created_at, which is
+        # upload time and answers none of them.
+        Index("ix_recordings_started_at", "started_at"),
         Index("ix_recordings_status_created", "processing_status", "created_at"),
         Index("ix_recordings_checked_created", "checked", "created_at"),
     )

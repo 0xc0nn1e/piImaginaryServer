@@ -2523,7 +2523,8 @@ blockquote:has(ruby),
   font-size: 0.7rem;
 }
 
-.day-unanalysed {
+.day-unanalysed,
+.day-queued {
   padding: 2px 6px;
   border: 1px solid rgb(246 197 111 / 15%);
   border-radius: 5px;
@@ -2531,6 +2532,12 @@ blockquote:has(ruby),
   background: var(--amber-soft);
   font-family: var(--mono);
   font-size: 0.6rem;
+}
+
+.day-queued {
+  border-color: rgb(112 227 193 / 18%);
+  color: var(--mint);
+  background: var(--mint-soft);
 }
 
 .day-summary {

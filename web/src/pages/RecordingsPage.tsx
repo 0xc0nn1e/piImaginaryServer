@@ -34,6 +34,24 @@ function localInputTime(timestamp: number): string {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
+// A date field accepts a five digit year, and a hand-edited URL can carry a
+// day that never existed. Normalising in one place keeps the URL, the request,
+// and the field itself from disagreeing about what is filtered.
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeDay(value: string): string {
+  if (!DAY_PATTERN.test(value)) return "";
+  // The shape is not the day: 2026-02-30 parses, rolling silently into March,
+  // and the server would reject the day the field still claims to be showing.
+  // Only a value that survives the round trip is a day that exists.
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return "";
+  // Year 0000 survives the round trip here but is not a date the server can
+  // hold: its calendar starts at year 1 and rejects the request outright.
+  if (parsed.getUTCFullYear() < 1) return "";
+  return parsed.toISOString().slice(0, 10) === value ? value : "";
+}
+
 export function RecordingsPage() {
   const navigate = useNavigate();
   const { invalidate } = useAuth();
@@ -49,9 +67,12 @@ export function RecordingsPage() {
   const checkedFilter =
     rawChecked === "all" ? "all" : rawChecked === "true" ? "true" : "false";
   const checked = checkedFilter === "all" ? undefined : checkedFilter === "true";
+  // A Japan-time calendar day, the same one the day pages group by.
+  const day = normalizeDay(searchParams.get("day") ?? "");
   const [deviceInput, setDeviceInput] = useState(deviceId);
   const [statusInput, setStatusInput] = useState<RecordingStatus | "">(status);
   const [checkedInput, setCheckedInput] = useState(checkedFilter);
+  const [dayInput, setDayInput] = useState(day);
   const [checkPending, setCheckPending] = useState<ReadonlySet<string>>(() => new Set());
   const [data, setData] = useState<RecordingListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,11 +86,23 @@ export function RecordingsPage() {
   const [skippedCount, setSkippedCount] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // A link can carry a day this list cannot filter by. The request already
+  // ignores it, so the address bar has to stop claiming it too, or the URL
+  // that gets shared next says the list is filtered when it is not.
+  useEffect(() => {
+    const raw = searchParams.get("day");
+    if (raw === null || raw === day) return;
+    const next = new URLSearchParams(searchParams);
+    if (day) next.set("day", day);
+    else next.delete("day");
+    setSearchParams(next, { replace: true });
+  }, [day, searchParams, setSearchParams]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void listRecordings({ limit: PAGE_SIZE, offset, deviceId, status, checked })
+    void listRecordings({ limit: PAGE_SIZE, offset, deviceId, status, checked, day })
       .then((result) => {
         if (!cancelled) setData(result);
       })
@@ -88,7 +121,7 @@ export function RecordingsPage() {
     return () => {
       cancelled = true;
     };
-  }, [checked, deviceId, invalidate, navigate, offset, refreshKey, status, t]);
+  }, [checked, day, deviceId, invalidate, navigate, offset, refreshKey, status, t]);
 
   function addFiles(files: FileList | File[]) {
     const candidates = Array.from(files);
@@ -212,6 +245,12 @@ export function RecordingsPage() {
     if (deviceInput.trim()) next.set("device_id", deviceInput.trim());
     if (statusInput) next.set("status", statusInput);
     if (checkedInput !== "false") next.set("checked", checkedInput);
+    // The same normalisation the request uses. Writing the raw field instead
+    // would let the URL and the visible field claim a day the list never
+    // filtered by.
+    const nextDay = normalizeDay(dayInput);
+    if (nextDay) next.set("day", nextDay);
+    setDayInput(nextDay);
     setSearchParams(next);
   }
 
@@ -396,6 +435,15 @@ export function RecordingsPage() {
           />
         </label>
         <label>
+          {t("recordings.day")}
+          <input
+            name="day"
+            type="date"
+            value={dayInput}
+            onChange={(event) => setDayInput(event.target.value)}
+          />
+        </label>
+        <label>
           {t("recordings.status")}
           <select
             name="status"
@@ -442,7 +490,7 @@ export function RecordingsPage() {
         <div className="empty-state">
           <span className="empty-wave" aria-hidden="true" />
           <h2>{t("recordings.emptyTitle")}</h2>
-          <p>{deviceId || status || checkedFilter !== "false" ? t("recordings.emptyFiltered") : t("recordings.allChecked")}</p>
+          <p>{deviceId || status || day || checkedFilter !== "false" ? t("recordings.emptyFiltered") : t("recordings.allChecked")}</p>
         </div>
       ) : null}
       {!loading && data && data.items.length > 0 ? (

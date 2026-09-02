@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
-import { ApiError, getDay, listDays, reprocessDaySummary } from "../api";
+import {
+  ApiError,
+  getDay,
+  listDays,
+  reprocessDayAnalyses,
+  reprocessDaySummary,
+} from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { Furigana } from "../components/Furigana";
 import { LoadingView } from "../components/LoadingView";
@@ -24,6 +30,27 @@ export function DayPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [queueing, setQueueing] = useState(false);
+  const [analysing, setAnalysing] = useState(false);
+  // A request of ours changed the day and the page could not read the result
+  // back. The work is committed, so the day on screen is known to be behind:
+  // the actions stay shut until a read gets through, or the page would offer
+  // to queue what it has already queued.
+  const [pendingReload, setPendingReload] = useState(false);
+  // A read describes the day as it was when the read was issued. Once a
+  // request of ours commits, an answer already in flight describes a day that
+  // no longer exists, and applying it would put that day back and reopen the
+  // actions the change was queued from. Reads carry the count they were issued
+  // under and are dropped once it has moved on. The poll's own cancel flag
+  // cannot stand in for this: it is set when the effect re-runs, which a stale
+  // answer can beat, and a change that leaves every dependency equal re-runs
+  // nothing at all.
+  const changes = useRef(0);
+  // The day a read was issued for is the other half of that: the route can
+  // move while a read is in flight, and its answer describes the day it asked
+  // for, not the one now on screen. Applying it would leave the page headed
+  // one day and filled with another.
+  const shownDay = useRef(day);
+  shownDay.current = day;
 
   const handleUnauthorized = useCallback(
     (caught: unknown) => {
@@ -36,6 +63,27 @@ export function DayPage() {
     },
     [invalidate, navigate],
   );
+
+  // Re-reading the day after a request that already succeeded. It reports a
+  // failure the way the poll does, as a day that could not be read: turning it
+  // into the request's own failure would deny work the server has committed
+  // and invite the user to ask for it a second time.
+  const refresh = useCallback(async () => {
+    if (!day) return;
+    const issuedAt = changes.current;
+    try {
+      const result = await getDay(day);
+      if (day !== shownDay.current || issuedAt !== changes.current) return;
+      setDetail(result);
+      setError(null);
+      setPendingReload(false);
+    } catch (caught: unknown) {
+      if (handleUnauthorized(caught)) return;
+      if (day !== shownDay.current || issuedAt !== changes.current) return;
+      setError(t("days.loadError"));
+      setPendingReload(true);
+    }
+  }, [day, handleUnauthorized, t]);
 
   useEffect(() => {
     const signal = { cancelled: false };
@@ -63,23 +111,38 @@ export function DayPage() {
   const summaryJobActive =
     detail?.job?.kind === "daily_summary" &&
     (detail.job.status === "queued" || detail.job.status === "processing");
+  // The day's recordings a job already holds. They are what the day is still
+  // waiting on, so the page keeps refreshing until the last one lets go.
+  const activeJobIds = useMemo(
+    () => new Set(detail?.active_job_recording_ids ?? []),
+    [detail],
+  );
+  const recordingJobsActive = activeJobIds.size > 0;
 
   // Chained timeouts, not an interval: a slow poll would otherwise overlap the
   // next one and an older response could land last, overwriting fresher state.
   const running = useRef(false);
-  running.current = Boolean(summaryJobActive);
+  running.current = Boolean(summaryJobActive) || recordingJobsActive || pendingReload;
+
+  useEffect(() => {
+    setNotice(null);
+  }, [day]);
 
   useEffect(() => {
     if (!day) return;
     const state = { cancelled: false, timer: 0 };
     const load = async () => {
+      const issuedAt = changes.current;
       try {
         const result = await getDay(day);
-        if (state.cancelled) return;
+        if (state.cancelled || day !== shownDay.current) return;
+        if (issuedAt !== changes.current) return;
         setDetail(result);
         setError(null);
+        setPendingReload(false);
       } catch (caught: unknown) {
         if (state.cancelled || handleUnauthorized(caught)) return;
+        if (day !== shownDay.current || issuedAt !== changes.current) return;
         setError(t("days.loadError"));
       } finally {
         if (!state.cancelled) setLoading(false);
@@ -97,7 +160,7 @@ export function DayPage() {
       state.cancelled = true;
       window.clearTimeout(state.timer);
     };
-  }, [day, handleUnauthorized, t, summaryJobActive]);
+  }, [day, handleUnauthorized, pendingReload, recordingJobsActive, t, summaryJobActive]);
 
   async function generate() {
     if (!day) return;
@@ -105,13 +168,54 @@ export function DayPage() {
     setNotice(null);
     try {
       await reprocessDaySummary(day);
+      // The page can move to another day while the request is in flight. What
+      // came back describes the day that was pressed, so none of it belongs
+      // here: not the notice, and not the change count, which the reads of the
+      // day now on screen are measured against — raising it would discard the
+      // read that is fetching this day and leave the last one in its place.
+      // The work is queued either way and shows when that day is opened again.
+      if (day !== shownDay.current) return;
+      changes.current += 1;
       setNotice(t("days.queued"));
-      setDetail(await getDay(day));
+      await refresh();
     } catch (caught: unknown) {
-      if (handleUnauthorized(caught)) return;
+      if (handleUnauthorized(caught) || day !== shownDay.current) return;
       setNotice(caught instanceof ApiError ? caught.message : t("days.queueError"));
     } finally {
       setQueueing(false);
+    }
+  }
+
+  async function analysePending() {
+    if (!day) return;
+    setAnalysing(true);
+    setNotice(null);
+    try {
+      const result = await reprocessDayAnalyses(day);
+      // The page can move to another day while the request is in flight. What
+      // came back describes the day that was pressed, so none of it belongs
+      // here: not the notice, and not the change count, which the reads of the
+      // day now on screen are measured against — raising it would discard the
+      // read that is fetching this day and leave the last one in its place.
+      // The work is queued either way and shows when that day is opened again.
+      if (day !== shownDay.current) return;
+      changes.current += 1;
+      const queued = result.queued_recording_ids.length;
+      // The server decides what it could actually take, so the notice reports
+      // its answer rather than the count the button was offering.
+      const parts = [
+        queued > 0
+          ? t("days.analysisQueued", { count: queued })
+          : t("days.analysisNothingQueued"),
+      ];
+      if (result.skipped > 0) parts.push(t("days.analysisSkipped", { count: result.skipped }));
+      setNotice(parts.join(" "));
+      await refresh();
+    } catch (caught: unknown) {
+      if (handleUnauthorized(caught) || day !== shownDay.current) return;
+      setNotice(caught instanceof ApiError ? caught.message : t("days.analysisError"));
+    } finally {
+      setAnalysing(false);
     }
   }
 
@@ -128,6 +232,15 @@ export function DayPage() {
     [detail],
   );
   const analysed = new Set(detail?.analysed_recording_ids ?? []);
+  // The recordings the batch endpoint would pick: transcribed, without an
+  // analysis to show, and not already held by a job. Choosing them by the same
+  // rule keeps the button from offering work the server would only skip.
+  const pendingAnalysis = (detail?.recordings ?? []).filter(
+    (recording) =>
+      recording.processing_status === "completed" &&
+      !analysed.has(recording.id) &&
+      !activeJobIds.has(recording.id),
+  );
 
   if (!day && days?.length === 0) {
     return (
@@ -179,7 +292,9 @@ export function DayPage() {
                 <div className="day-recording-meta">
                   <StatusBadge status={recording.processing_status} />
                   <span>{formatDuration(recording.duration_seconds, locale)}</span>
-                  {analysed.has(recording.id) ? null : (
+                  {activeJobIds.has(recording.id) ? (
+                    <span className="day-queued">{t("days.jobActive")}</span>
+                  ) : analysed.has(recording.id) ? null : (
                     <span className="day-unanalysed">{t("days.notAnalysed")}</span>
                   )}
                 </div>
@@ -196,9 +311,21 @@ export function DayPage() {
             </div>
             {detail && detail.recordings.length > 0 ? (
               <div className="inline-actions">
+                {pendingAnalysis.length > 0 ? (
+                  <button
+                    className="button button-secondary"
+                    disabled={analysing || pendingReload}
+                    type="button"
+                    onClick={() => void analysePending()}
+                  >
+                    {analysing
+                      ? t("days.queueing")
+                      : t("days.analysePending", { count: pendingAnalysis.length })}
+                  </button>
+                ) : null}
                 <button
                   className="button button-secondary"
-                  disabled={queueing || summaryJobActive}
+                  disabled={queueing || summaryJobActive || pendingReload}
                   type="button"
                   onClick={() => void generate()}
                 >
@@ -225,6 +352,11 @@ export function DayPage() {
           {summaryJobActive ? (
             <div className="notice notice-action" role="status">
               {t("days.running")}
+            </div>
+          ) : null}
+          {recordingJobsActive ? (
+            <div className="notice notice-action" role="status">
+              {t("days.analysisRunning", { count: activeJobIds.size })}
             </div>
           ) : null}
           {detail?.stale ? (

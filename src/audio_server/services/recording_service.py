@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePath, PurePosixPath
 from typing import BinaryIO
 
@@ -46,7 +46,7 @@ from audio_server.processing.errors import (
     RetryableProcessingError,
 )
 from audio_server.services.bookmark_service import detach_recording_bookmarks
-from audio_server.services.daily_service import day_of
+from audio_server.services.daily_service import day_of, day_window
 from audio_server.services.storage import (
     StagedDeletion,
     StagedUpload,
@@ -261,10 +261,16 @@ class RecordingService:
         device_id: str | None,
         status: RecordingStatus | None,
         checked: bool | None = None,
+        day: date | None = None,
     ) -> list[Recording]:
         statement: Select[tuple[Recording]] = select(Recording)
         if device_id is not None:
             statement = statement.where(Recording.device_id == device_id)
+        if day is not None:
+            # The same Japan-time day the day pages group by, expressed as a
+            # range so the query can use ``ix_recordings_started_at``.
+            start, end = day_window(day)
+            statement = statement.where(Recording.started_at >= start, Recording.started_at < end)
         if status is not None:
             statement = statement.where(Recording.processing_status == status)
         if checked is not None:
@@ -642,6 +648,53 @@ class RecordingService:
             disallowed_message="Analysis can be queued after transcription completes.",
             kind=JobKind.ANALYSIS,
         )
+
+    def reprocess_analyses(
+        self, recording_ids: Sequence[uuid.UUID]
+    ) -> tuple[list[ProcessingJob], int]:
+        """Queue analysis for each recording, skipping the ones that cannot take it.
+
+        Every recording is enqueued in its own transaction so one refusal does
+        not cost the rest their job. A recording that was deleted or gained a
+        job since the caller chose it is skipped rather than failing the batch:
+        the caller asked for whatever is still queueable, not for a set that
+        has to be queueable as a whole.
+
+        The active-job check runs while the recording row is held, but not
+        every path that creates a job takes that row, so the partial unique
+        index is what finally settles a tie. The loser arrives as an
+        IntegrityError rather than a refusal, and letting it escape would fail
+        a request whose earlier recordings already hold committed jobs and
+        report none of them.
+
+        Only the failure the exception itself names is treated as the race.
+        Asking the database afterwards whether the recording is now held would
+        answer about a different moment than the one that failed: a winner that
+        has since finished reads as no race at all, and an unrelated breakage
+        reads as one whenever some other writer happens to be holding the row.
+        Anything this does not recognise is left to travel, rather than being
+        filed away as one more skipped recording inside a successful answer.
+        """
+
+        jobs: list[ProcessingJob] = []
+        skipped = 0
+        for recording_id in recording_ids:
+            reason: str
+            try:
+                jobs.append(self.reprocess_analysis(recording_id))
+                continue
+            except RecordingServiceError as error:
+                reason = error.code
+            except IntegrityError as error:
+                if not _lost_active_job_race(error):
+                    raise
+                reason = "job_already_active"
+            skipped += 1
+            logger.info(
+                "batch analysis skipped a recording",
+                extra={"recording_id": str(recording_id), "reason": reason},
+            )
+        return jobs, skipped
 
     def update_translations(
         self,
@@ -1185,6 +1238,25 @@ class RecordingService:
         owner_id = session.scalar(select(Recording.id).where(Recording.storage_key == storage_key))
         if owner_id is None:
             self._storage.delete(storage_key)
+
+
+def _lost_active_job_race(error: IntegrityError) -> bool:
+    """Whether this integrity failure is the active-job index refusing a tie.
+
+    Decided from the exception alone, at the moment it was raised, so the
+    answer describes the failure rather than whatever the table looks like a
+    moment later. PostgreSQL names the offending index in its diagnostics.
+    SQLite carries no diagnostics and names the column the index covers
+    instead, which is unambiguous here: no other unique index on this table
+    spans ``recording_id``. A form neither branch recognises is not claimed as
+    a race, so an unfamiliar failure surfaces instead of being swallowed.
+    """
+
+    original = error.orig
+    constraint = getattr(getattr(original, "diag", None), "constraint_name", None)
+    if constraint:
+        return bool(constraint == "uq_processing_jobs_one_active_recording")
+    return "UNIQUE constraint failed: processing_jobs.recording_id" in str(original)
 
 
 def _overlap_flags(ordered: list[TranscriptSegmentUpdate]) -> list[bool]:

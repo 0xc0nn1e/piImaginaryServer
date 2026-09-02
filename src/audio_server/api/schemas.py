@@ -353,6 +353,7 @@ class DayDetailResponse(BaseModel):
     day: date
     recordings: list[RecordingSummary]
     analysed_recording_ids: list[uuid.UUID]
+    active_job_recording_ids: list[uuid.UUID] = Field(default_factory=list)
     status: AnalysisStatus | None
     provider: str | None
     model: str | None
@@ -368,6 +369,18 @@ class DaySummaryQueuedResponse(BaseModel):
     day: date
     job_id: uuid.UUID
     status: JobStatus
+
+
+class DayAnalysisQueuedResponse(BaseModel):
+    """What one press of the day's batch analysis button actually queued.
+
+    A recording that gained a job elsewhere between the day being read and the
+    request arriving is counted as skipped rather than failing the batch.
+    """
+
+    day: date
+    queued_recording_ids: list[uuid.UUID]
+    skipped: int
 
 
 class AnalysisUpdateRequest(BaseModel):

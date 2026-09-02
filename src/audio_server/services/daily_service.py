@@ -22,8 +22,10 @@ from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
     DailySummary,
+    JobStatus,
     ProcessingJob,
     Recording,
+    RecordingStatus,
 )
 from audio_server.jobs.queue import InvalidRetryStateError, create_daily_summary_job
 from audio_server.processing.contracts import AnalysisResult, DailyRecordingDigest
@@ -54,8 +56,8 @@ def day_window(day: date) -> tuple[datetime, datetime]:
     """Return the half-open UTC range covering one Japan-time day.
 
     Expressing the day as a range keeps the query a plain comparison on
-    ``started_at``, so it uses the existing index and behaves identically on
-    PostgreSQL and on the SQLite used by unit tests.
+    ``started_at``, so it can use ``ix_recordings_started_at`` and behaves
+    identically on PostgreSQL and on the SQLite used by unit tests.
     """
 
     start = datetime.combine(day, time.min, tzinfo=DAY_TIMEZONE)
@@ -76,6 +78,7 @@ class DayDetail:
     day: date
     recordings: list[Recording] = field(default_factory=list)
     analysed_ids: set[uuid.UUID] = field(default_factory=set)
+    active_job_ids: set[uuid.UUID] = field(default_factory=set)
     summary: DailySummary | None = None
     stale: bool = False
     job: ProcessingJob | None = None
@@ -163,12 +166,14 @@ class DailyService:
                 .limit(1)
             )
             analysed = self._analysed_recording_ids(session)
+            ids = [recording.id for recording in recordings]
             return DayDetail(
                 day=day,
                 recordings=recordings,
                 analysed_ids={
                     recording.id for recording in recordings if recording.id in analysed
                 },
+                active_job_ids=self._active_job_recording_ids(session, ids),
                 summary=summary,
                 stale=self._is_stale(session, day, summary) if summary else False,
                 job=job,
@@ -201,6 +206,36 @@ class DailyService:
                     "This day already has a summary in the queue.",
                     status_code=409,
                 ) from exc
+
+    def pending_analysis_recording_ids(self, day: date) -> list[uuid.UUID]:
+        """The day's transcribed recordings that still have no analysis to show.
+
+        A failed or missing analysis both count as pending, which is exactly
+        what the day page marks as not analysed. Recordings that already hold a
+        queued or running job are left out so the batch does not report work it
+        was never going to be allowed to queue.
+        """
+
+        start, end = day_window(day)
+        with self._session_factory() as session:
+            analysed = self._analysed_recording_ids(session)
+            ids = list(
+                session.scalars(
+                    select(Recording.id)
+                    .where(
+                        Recording.started_at >= start,
+                        Recording.started_at < end,
+                        Recording.processing_status == RecordingStatus.COMPLETED,
+                    )
+                    .order_by(Recording.started_at, Recording.id)
+                )
+            )
+            active = self._active_job_recording_ids(session, ids)
+            return [
+                recording_id
+                for recording_id in ids
+                if recording_id not in analysed and recording_id not in active
+            ]
 
     def collect_digests(self, day: date) -> tuple[list[DailyRecordingDigest], list[dict[str, Any]]]:
         """Build the summary input and the revision snapshot it was built from."""
@@ -298,6 +333,26 @@ class DailyService:
             return False
         _, current = self._collect(session, day)
         return _revision_key(current) != _revision_key(summary.source_revisions or [])
+
+    def _active_job_recording_ids(
+        self, session: Session, recording_ids: Sequence[uuid.UUID]
+    ) -> set[uuid.UUID]:
+        """Which of these recordings already have a queued or running job."""
+
+        if not recording_ids:
+            return set()
+        # A day summary job carries no recording, so the column is nullable
+        # even though this filter can only match rows that name one.
+        return {
+            recording_id
+            for recording_id in session.scalars(
+                select(ProcessingJob.recording_id).where(
+                    ProcessingJob.recording_id.in_(recording_ids),
+                    ProcessingJob.status.in_([JobStatus.QUEUED, JobStatus.PROCESSING]),
+                )
+            )
+            if recording_id is not None
+        }
 
     def _analysed_recording_ids(self, session: Session) -> set[uuid.UUID]:
         return set(

@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from audio_server.db.activity_models import ProcessingActivity
@@ -284,6 +285,82 @@ class TestDaySummaryJob:
 
         assert caught.value.status_code == 409
         assert caught.value.code == "daily_summary_not_available"
+
+
+class _Diagnostics:
+    def __init__(self, constraint_name: str) -> None:
+        self.constraint_name = constraint_name
+
+
+class _PostgresViolation(Exception):
+    """A psycopg-shaped integrity error, which names the index it refused."""
+
+    def __init__(self, constraint_name: str) -> None:
+        super().__init__("duplicate key value violates unique constraint")
+        self.diag = _Diagnostics(constraint_name)
+
+
+class TestPendingDayAnalyses:
+    def test_only_the_days_unanalysed_recordings_are_pending(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        service = DailyService(session_factory=session_factory)
+        wanted = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        # Already analysed, so nothing to ask the worker for.
+        _seed_recording(session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC))
+        # Unanalysed, but past midnight in Tokyo and so on the next day.
+        _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 15, 30, tzinfo=UTC),
+            analysed=False,
+        )
+
+        assert service.pending_analysis_recording_ids(date(2026, 8, 27)) == [wanted]
+
+    def test_a_recording_still_being_transcribed_is_not_pending(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        # Analysis reads a committed transcript, so a recording without one
+        # could only be refused; offering it would just inflate the count.
+        service = DailyService(session_factory=session_factory)
+        recording_id = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        with session_factory.begin() as session:
+            recording = session.get(Recording, recording_id)
+            assert recording is not None
+            recording.processing_status = RecordingStatus.PROCESSING
+
+        assert service.pending_analysis_recording_ids(date(2026, 8, 27)) == []
+
+    def test_a_recording_with_a_live_job_is_not_pending(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        service = DailyService(session_factory=session_factory)
+        recording_id = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        with session_factory.begin() as session:
+            session.add(
+                ProcessingJob(
+                    recording_id=recording_id,
+                    kind=JobKind.ANALYSIS,
+                    status=JobStatus.QUEUED,
+                    stage=JobStage.QUEUED,
+                    available_at=_AVAILABLE_AT,
+                )
+            )
+
+        assert service.pending_analysis_recording_ids(date(2026, 8, 27)) == []
+        assert service.get_day(date(2026, 8, 27)).active_job_ids == {recording_id}
 
 
 class TestWorkerHandling:
@@ -586,6 +663,243 @@ class TestDaysApi:
         assert body["job"]["status"] == "failed"
         assert body["job"]["error"]["code"] == "lmstudio_unavailable"
         assert body["job"]["error"]["message"] == "LM Studio is temporarily unavailable."
+
+    def test_recordings_can_be_filtered_to_one_japan_time_day(
+        self, app_client: TestClient
+    ) -> None:
+        session_factory = app_client.app.state.test_session_factory
+        wanted = _seed_recording(
+            session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+        )
+        # 15:30 UTC is past midnight in Tokyo, so it belongs to the next day.
+        _seed_recording(session_factory, started_at=datetime(2026, 8, 27, 15, 30, tzinfo=UTC))
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        filtered = app_client.get("/api/v1/recordings?day=2026-08-27", headers=headers)
+        unfiltered = app_client.get("/api/v1/recordings", headers=headers)
+
+        assert filtered.status_code == 200
+        assert [item["id"] for item in filtered.json()["items"]] == [str(wanted)]
+        assert len(unfiltered.json()["items"]) == 2
+
+    def test_the_days_missing_analyses_are_queued_in_one_press(
+        self, app_client: TestClient
+    ) -> None:
+        session_factory = app_client.app.state.test_session_factory
+        pending = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        analysed = _seed_recording(
+            session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+        )
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        response = app_client.post("/api/v1/days/2026-08-27/analysis/reprocess", headers=headers)
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "day": "2026-08-27",
+            "queued_recording_ids": [str(pending)],
+            "skipped": 0,
+        }
+        with session_factory() as session:
+            queued = session.scalars(
+                select(ProcessingJob).where(ProcessingJob.status == JobStatus.QUEUED)
+            ).all()
+            assert [(job.recording_id, job.kind) for job in queued] == [
+                (pending, JobKind.ANALYSIS)
+            ]
+            # The analysed recording keeps the analysis it already has.
+            recording = session.get(Recording, analysed)
+            assert recording is not None
+            assert recording.processing_status is RecordingStatus.COMPLETED
+
+    def test_a_recording_lost_to_a_concurrent_insert_is_only_skipped(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The batch reports what it committed even when it loses a race.
+
+        The active-job check runs under the recording row, but job creation
+        does not always take that row, so the partial unique index settles the
+        tie at commit time and the loser arrives as an IntegrityError. Letting
+        it escape would answer with a failure for recordings that already hold
+        queued jobs.
+        """
+
+        session_factory = app_client.app.state.test_session_factory
+        contested = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        queueable = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        service = app_client.app.state.recording_service
+        original = service.reprocess_analysis
+
+        def analysis_job() -> ProcessingJob:
+            return ProcessingJob(
+                recording_id=contested,
+                kind=JobKind.ANALYSIS,
+                status=JobStatus.QUEUED,
+                stage=JobStage.QUEUED,
+                available_at=_AVAILABLE_AT,
+            )
+
+        def lose_the_race(recording_id: uuid.UUID) -> ProcessingJob:
+            if recording_id != contested:
+                return original(recording_id)
+            # The winner commits, then this insert meets the index that settles
+            # the tie. The refusal comes from the database, so the classifier
+            # is read against what a driver really raises.
+            with session_factory.begin() as session:
+                session.add(analysis_job())
+            with session_factory.begin() as session:
+                session.add(analysis_job())
+            raise AssertionError("the second job should have been refused")
+
+        monkeypatch.setattr(service, "reprocess_analysis", lose_the_race)
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        response = app_client.post("/api/v1/days/2026-08-27/analysis/reprocess", headers=headers)
+
+        assert response.status_code == 202
+        assert response.json() == {
+            "day": "2026-08-27",
+            "queued_recording_ids": [str(queueable)],
+            "skipped": 1,
+        }
+        with session_factory() as session:
+            queued = session.scalars(
+                select(ProcessingJob).where(ProcessingJob.status == JobStatus.QUEUED)
+            ).all()
+            assert sorted(str(job.recording_id) for job in queued) == sorted(
+                [str(contested), str(queueable)]
+            )
+
+    def test_the_deployed_drivers_own_refusal_is_read_as_the_lost_race(
+        self, app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """psycopg names the refused index; SQLite cannot, and this suite is SQLite.
+
+        Without this the classifier's PostgreSQL branch would never be read,
+        and the deployment would be the first place it ran.
+        """
+
+        session_factory = app_client.app.state.test_session_factory
+        _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        service = app_client.app.state.recording_service
+
+        def lose_the_race(recording_id: uuid.UUID) -> ProcessingJob:
+            raise IntegrityError(
+                "INSERT", {}, _PostgresViolation("uq_processing_jobs_one_active_recording")
+            )
+
+        monkeypatch.setattr(service, "reprocess_analysis", lose_the_race)
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        response = app_client.post("/api/v1/days/2026-08-27/analysis/reprocess", headers=headers)
+
+        assert response.status_code == 202
+        assert response.json()["queued_recording_ids"] == []
+        assert response.json()["skipped"] == 1
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            pytest.param(Exception("CHECK constraint failed: processing_job_scope"), id="sqlite"),
+            pytest.param(_PostgresViolation("processing_jobs_pkey"), id="postgres"),
+        ],
+    )
+    def test_an_integrity_failure_that_is_not_a_lost_race_is_not_hidden(
+        self,
+        app_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        original: Exception,
+    ) -> None:
+        """A broken constraint must not be filed away as a skipped recording.
+
+        Only the active-job index means another writer got there first. Every
+        other integrity failure is a defect, including a unique violation on
+        some other index, and counting it as one more skip would bury it
+        inside a successful answer.
+        """
+
+        session_factory = app_client.app.state.test_session_factory
+        _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        service = app_client.app.state.recording_service
+
+        def fail_for_another_reason(recording_id: uuid.UUID) -> ProcessingJob:
+            raise IntegrityError("INSERT", {}, original)
+
+        monkeypatch.setattr(service, "reprocess_analysis", fail_for_another_reason)
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        response = app_client.post("/api/v1/days/2026-08-27/analysis/reprocess", headers=headers)
+
+        assert response.status_code == 500
+        with session_factory() as session:
+            assert (
+                session.scalars(
+                    select(ProcessingJob).where(ProcessingJob.status == JobStatus.QUEUED)
+                ).all()
+                == []
+            )
+
+    def test_a_day_with_nothing_to_analyse_queues_nothing(self, app_client: TestClient) -> None:
+        session_factory = app_client.app.state.test_session_factory
+        _seed_recording(session_factory, started_at=datetime(2026, 8, 27, 1, 0, tzinfo=UTC))
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        response = app_client.post("/api/v1/days/2026-08-27/analysis/reprocess", headers=headers)
+
+        assert response.status_code == 202
+        assert response.json()["queued_recording_ids"] == []
+        with session_factory() as session:
+            assert (
+                session.scalars(
+                    select(ProcessingJob).where(ProcessingJob.status == JobStatus.QUEUED)
+                ).all()
+                == []
+            )
+
+    def test_a_day_reports_the_recordings_a_job_already_holds(
+        self, app_client: TestClient
+    ) -> None:
+        session_factory = app_client.app.state.test_session_factory
+        recording_id = _seed_recording(
+            session_factory,
+            started_at=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
+            analysed=False,
+        )
+        with session_factory.begin() as session:
+            session.add(
+                ProcessingJob(
+                    recording_id=recording_id,
+                    kind=JobKind.ANALYSIS,
+                    status=JobStatus.PROCESSING,
+                    stage=JobStage.ANALYZING,
+                    available_at=_AVAILABLE_AT,
+                )
+            )
+        headers = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+
+        body = app_client.get("/api/v1/days/2026-08-27", headers=headers).json()
+
+        assert body["active_job_recording_ids"] == [str(recording_id)]
 
     def test_days_require_authentication(self, app_client: TestClient) -> None:
         assert app_client.get("/api/v1/days").status_code == 401

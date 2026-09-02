@@ -6,6 +6,7 @@ import type {
   BookmarkCreateRequest,
   BookmarkKind,
   BookmarkListResponse,
+  DayAnalysisQueuedResponse,
   DayDetailResponse,
   DayListResponse,
   DaySummaryQueuedResponse,
@@ -170,12 +171,20 @@ export function reprocessDaySummary(day: string): Promise<DaySummaryQueuedRespon
   });
 }
 
+export function reprocessDayAnalyses(day: string): Promise<DayAnalysisQueuedResponse> {
+  return request(`/api/v1/days/${encodeURIComponent(day)}/analysis/reprocess`, {
+    method: "POST",
+    csrfToken: requireCsrfCookie(),
+  });
+}
+
 export function listRecordings(params: {
   limit: number;
   offset: number;
   deviceId?: string;
   status?: RecordingStatus | "";
   checked?: boolean;
+  day?: string;
 }): Promise<RecordingListResponse> {
   const query = new URLSearchParams({
     limit: String(params.limit),
@@ -184,6 +193,7 @@ export function listRecordings(params: {
   if (params.deviceId) query.set("device_id", params.deviceId);
   if (params.status) query.set("status", params.status);
   if (params.checked !== undefined) query.set("checked", String(params.checked));
+  if (params.day) query.set("day", params.day);
   return request(`/api/v1/recordings?${query.toString()}`);
 }
 

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -47,6 +47,107 @@ afterEach(() => {
 });
 
 describe("review marks on the recordings list", () => {
+  it("filters the list to one recording day", async () => {
+    window.history.replaceState({}, "", "/recordings");
+    const days: (string | null)[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-27T08:00:00Z" });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        days.push(new URL(path, "http://localhost").searchParams.get("day"));
+        return jsonResponse({ items: [recording(0)], limit: PAGE_SIZE, offset: 0 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByDisplayValue("只看未檢查");
+    await browser.type(screen.getByLabelText("錄音日期（日本時間）"), "2026-08-27");
+    await browser.click(screen.getByRole("button", { name: "套用篩選" }));
+
+    await waitFor(() => expect(days.at(-1)).toBe("2026-08-27"));
+    // The chosen day survives in the URL, so the filtered list can be shared
+    // and a reload keeps showing it.
+    expect(new URL(window.location.href).searchParams.get("day")).toBe("2026-08-27");
+  });
+
+  it("does not claim a day the list never filtered by", async () => {
+    // A date field accepts a five digit year. Writing the raw field into the
+    // URL would leave it and the field showing a filter the request dropped.
+    window.history.replaceState({}, "", "/recordings");
+    const days: (string | null)[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-27T08:00:00Z" });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        days.push(new URL(path, "http://localhost").searchParams.get("day"));
+        return jsonResponse({ items: [recording(0)], limit: PAGE_SIZE, offset: 0 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByDisplayValue("只看未檢查");
+    const field = screen.getByLabelText("錄音日期（日本時間）");
+    fireEvent.change(field, { target: { value: "20260-08-27" } });
+    await browser.click(screen.getByRole("button", { name: "套用篩選" }));
+
+    await waitFor(() => expect(new URL(window.location.href).search).not.toContain("day="));
+    expect(field).toHaveValue("");
+    expect(days.every((value) => value === null)).toBe(true);
+  });
+
+  it.each(["2026-02-30", "0000-01-01"])(
+    "ignores %s, a day the server cannot hold",
+    async (unusable) => {
+    // A hand-edited link can carry either. 2026-02-30 rolls over into March
+    // rather than failing, and year 0000 parses cleanly here while the
+    // server's calendar starts at year 1, so both reach it as a rejection.
+    window.history.replaceState({}, "", `/recordings?day=${unusable}&checked=all`);
+    const days: (string | null)[] = [];
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/auth/setup-status") {
+        return jsonResponse({ setup_required: false, setup_enabled: false });
+      }
+      if (path === "/api/v1/auth/me") {
+        return jsonResponse({ user, expires_at: "2026-08-27T08:00:00Z" });
+      }
+      if (path.startsWith("/api/v1/recordings?")) {
+        days.push(new URL(path, "http://localhost").searchParams.get("day"));
+        return jsonResponse({ items: [recording(0)], limit: PAGE_SIZE, offset: 0 });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    await waitFor(() => expect(days.length).toBeGreaterThan(0));
+    expect(days.every((value) => value === null)).toBe(true);
+    // The address bar has to agree with the list: a day nothing filtered by
+    // is dropped, while the filters that are in effect stay put.
+    await waitFor(() =>
+      expect(new URL(window.location.href).searchParams.get("day")).toBeNull(),
+    );
+    expect(new URL(window.location.href).searchParams.get("checked")).toBe("all");
+    },
+  );
+
   it("opens on the recordings that still need review", async () => {
     window.history.replaceState({}, "", "/recordings");
     const queries: string[] = [];
