@@ -340,6 +340,38 @@ def test_browser_session_can_reprocess_and_delete_with_origin_and_csrf(
     assert app_client.get(f"/api/v1/recordings/{second_id}").status_code == 404
 
 
+def test_browser_session_can_queue_a_days_missing_analyses(
+    app_client: TestClient,
+    wav_bytes: bytes,
+) -> None:
+    """The day's batch button is a browser mutation, like its summary button.
+
+    A day route the request guard does not know is answered with the
+    bearer-token 401 that a browser can never satisfy, and the web UI reads
+    that as a dead session and shows the login screen.
+    """
+
+    _setup_and_login(app_client)
+    csrf_token = app_client.cookies.get("audio_server_csrf")
+    assert csrf_token
+    files, upload_headers, metadata = make_upload(wav_bytes)
+    assert (
+        app_client.post("/api/v1/recordings", files=files, headers=upload_headers).status_code
+        == 201
+    )
+    recording_id = uuid.UUID(metadata["id"])
+    _mark_terminal(app_client, recording_id)
+
+    # Midnight UTC on 10 August is 09:00 the same day in Tokyo.
+    queued = app_client.post(
+        "/api/v1/days/2026-08-10/analysis/reprocess",
+        headers={"Origin": ORIGIN, "X-CSRF-Token": csrf_token},
+    )
+
+    assert queued.status_code == 202
+    assert queued.json()["queued_recording_ids"] == [str(recording_id)]
+
+
 def test_browser_mutations_require_exact_origin_and_csrf(
     app_client: TestClient,
     wav_bytes: bytes,

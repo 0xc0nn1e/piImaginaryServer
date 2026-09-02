@@ -275,7 +275,12 @@ def _is_browser_read(scope: Scope) -> bool:
 
 
 def _is_browser_day_mutation(scope: Scope) -> bool:
-    """Only asking for a day summary; the day itself is never edited here."""
+    """A day's own buttons: summarise it, or analyse the recordings it holds.
+
+    Both only ask for work to be queued; the day itself is never edited here.
+    A day route missing from this list is answered with the bearer-token 401 a
+    browser can never satisfy, which the web UI reads as a dead session.
+    """
 
     path = str(scope.get("path", "")).rstrip("/")
     parts = path.split("/")
@@ -283,7 +288,7 @@ def _is_browser_day_mutation(scope: Scope) -> bool:
         scope.get("method") == "POST"
         and parts[:4] == ["", "api", "v1", "days"]
         and len(parts) == 7
-        and parts[-2:] == ["summary", "reprocess"]
+        and parts[-2:] in (["summary", "reprocess"], ["analysis", "reprocess"])
     )
 
 
