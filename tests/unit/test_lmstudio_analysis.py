@@ -387,6 +387,35 @@ def test_a_discarded_draft_is_refused_rather_than_used_when_the_answer_is_broken
     assert caught.value.code == "lmstudio_schema_invalid"
 
 
+def test_an_answer_that_quotes_the_mark_after_thinking_is_reported_not_rewritten() -> None:
+    answer = _draft()
+    answer["description"] = {
+        "ja": "「</think>」という表記について話しました。",
+        "zh_hk": "傾咗「</think>」呢個寫法。",
+    }
+
+    class QuotingAnswer(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            reply = (
+                "<think>\n要点を整理します。\n</think>\n"
+                f"{json.dumps(answer, ensure_ascii=False)}"
+            )
+            return _unstructured(reply)
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([QuotingAnswer(_draft())])),
+    )
+
+    # Where the block really ends cannot be told from the text here, so this is
+    # refused. Cutting at a guess would hand back half an answer as a whole one.
+    with pytest.raises(PermanentProcessingError) as caught:
+        provider.analyze("recording-id", [_segment()])
+
+    assert caught.value.code == "lmstudio_schema_invalid"
+
+
 def test_thinking_that_never_finished_is_not_answered_from() -> None:
     class UnfinishedModel(FakeModel):
         def respond(self, prompt: str, **kwargs: object) -> object:

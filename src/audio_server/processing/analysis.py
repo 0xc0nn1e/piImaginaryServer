@@ -426,7 +426,7 @@ def _candidates(response: object) -> tuple[Mapping[str, object], ...]:
         elif isinstance(value, BaseModel):
             found.append(value.model_dump())
         elif isinstance(value, str):
-            found.extend(_json_objects_in(_after_reasoning(value)))
+            found.extend(_json_objects_in(value))
     return tuple(found)
 
 
@@ -438,39 +438,31 @@ _REASONING_MARKS = (
 )
 
 
-def _after_reasoning(text: str) -> str:
-    """Return what the model wrote after it finished thinking aloud.
+def _inside_reasoning(text: str, start: int) -> bool:
+    """Whether the object at ``start`` lies within the model's thinking.
 
     A reasoning block holds attempts the model went on to revise, so an object
-    left inside one is not the reply even when it satisfies the schema.
+    left inside one is not the reply even when it satisfies the schema. But the
+    block is bounded by marks that are ordinary characters: a transcript can
+    quote one, so both the thinking and the answer written from it can contain
+    them, and where the block really ends is not knowable from the text alone.
 
-    Only a reply that opens with such a block is trimmed. The marks are
-    ordinary characters that a transcript can quote and an answer can therefore
-    contain, so searching every reply for them would cut a sound reply in half
-    over its own content.
-
-    Within a reply that does open with one, the block ends at its last close
-    mark, not its first: thinking that quotes the mark would otherwise end the
-    block early and leave the rest of the thinking looking like the answer.
-    The cost is a reply that both opens with a block and quotes the mark in its
-    answer, which is cut and then reported as unreadable. That is the right way
-    round -- a reported failure can be retried and seen, while a discarded
-    draft stored as the analysis looks exactly like a real one.
-
-    A block that opens and never closes means the reply ran out before an
-    answer was reached, which is reported rather than answered from an
-    unfinished draft.
+    Cutting at a guessed boundary damages whichever side guessed wrong. This
+    only ever refuses: an object counts as thinking when a block opens before
+    it and has not demonstrably closed before it -- the reply's last close mark
+    still falls at or after the object begins, or there is none. A reply that
+    quotes a mark inside its answer is therefore reported rather than rewritten
+    into something that reads like a real analysis.
     """
 
-    answer = text.lstrip()
     for opener, closer in _REASONING_MARKS:
-        if not answer.startswith(opener):
+        opened = text.rfind(opener, 0, start)
+        if opened == -1:
             continue
-        closed = answer.rfind(closer)
-        if closed == -1:
-            return ""
-        return answer[closed + len(closer) :]
-    return text
+        closed = text.rfind(closer)
+        if closed == -1 or closed < opened or closed >= start:
+            return True
+    return False
 
 
 def _json_objects_in(text: str) -> list[Mapping[str, object]]:
@@ -485,7 +477,7 @@ def _json_objects_in(text: str) -> list[Mapping[str, object]]:
         except ValueError:
             index = text.find("{", index + 1)
             continue
-        if isinstance(value, Mapping):
+        if isinstance(value, Mapping) and not _inside_reasoning(text, index):
             found.append(cast(Mapping[str, object], value))
         index = text.find("{", max(end, index + 1))
     found.reverse()
