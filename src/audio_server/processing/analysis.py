@@ -442,8 +442,8 @@ def _inside_reasoning(text: str, start: int) -> bool:
     """Whether the object at ``start`` lies within the model's thinking.
 
     A reasoning block holds attempts the model went on to revise, so an object
-    left inside one is not the reply even when it satisfies the schema. The
-    An object counts as thinking when the reply's last close mark falls before
+    left inside one is not the reply even when it satisfies the schema. An
+    object counts as thinking when the reply's last close mark falls before
     the block that opens above it -- so a second thought is not ended by the
     first one closing -- or when it falls at or after the object, since the
     model was still working up to that point.
@@ -465,8 +465,8 @@ def _inside_reasoning(text: str, start: int) -> bool:
         opened = text.rfind(opener, 0, start)
         if opened == -1:
             continue
-        # No close mark at all reads as `closed < opened`, since an opener that
-        # was found sits at or after zero.
+        # A reply with no close mark reads as `closed < opened`: rfind returns
+        # -1, and an opener that was found is at zero or later.
         closed = text.rfind(closer)
         if closed < opened or closed >= start:
             return True
