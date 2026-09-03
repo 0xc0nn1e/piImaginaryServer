@@ -416,6 +416,32 @@ def test_an_answer_that_quotes_the_mark_after_thinking_is_reported_not_rewritten
     assert caught.value.code == "lmstudio_schema_invalid"
 
 
+def test_a_second_thought_is_not_closed_by_the_first_one_ending() -> None:
+    draft = _draft()
+    draft["description"] = {"ja": "二度目の草稿です。", "zh_hk": "第二次嘅草稿。"}
+
+    class TwiceThinkingModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            reply = (
+                "<think>まず整理します。</think>\n少し補足します。\n"
+                f"<think>書いてみます: {json.dumps(draft, ensure_ascii=False)}"
+            )
+            return _unstructured(reply)
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([TwiceThinkingModel(_draft())])),
+    )
+
+    # The earlier block closing says nothing about the one open around this
+    # draft, and the reply stops before the model answers.
+    with pytest.raises(PermanentProcessingError) as caught:
+        provider.analyze("recording-id", [_segment()])
+
+    assert caught.value.code == "lmstudio_schema_invalid"
+
+
 def test_thinking_that_never_finished_is_not_answered_from() -> None:
     class UnfinishedModel(FakeModel):
         def respond(self, prompt: str, **kwargs: object) -> object:

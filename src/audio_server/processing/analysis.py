@@ -442,25 +442,32 @@ def _inside_reasoning(text: str, start: int) -> bool:
     """Whether the object at ``start`` lies within the model's thinking.
 
     A reasoning block holds attempts the model went on to revise, so an object
-    left inside one is not the reply even when it satisfies the schema. But the
-    block is bounded by marks that are ordinary characters: a transcript can
-    quote one, so both the thinking and the answer written from it can contain
-    them, and where the block really ends is not knowable from the text alone.
+    left inside one is not the reply even when it satisfies the schema. The
+    block is open at a point when the nearest mark before it opens one rather
+    than closes one, which stays right when a model thinks more than once. An
+    object is also taken as thinking while the reply goes on to close a block
+    after it, since the model was still working up to that point.
 
-    Cutting at a guessed boundary damages whichever side guessed wrong. This
-    only ever refuses: an object counts as thinking when a block opens before
-    it and has not demonstrably closed before it -- the reply's last close mark
-    still falls at or after the object begins, or there is none. A reply that
-    quotes a mark inside its answer is therefore reported rather than rewritten
-    into something that reads like a real analysis.
+    Nothing is cut, only passed over, because these marks are ordinary
+    characters that a transcript can quote: an answer that quotes one is still
+    an answer, and reading it as a boundary would hand back half of it as if it
+    were whole.
+
+    What no reading of the text can settle is a reply that quotes a close mark
+    while still thinking and then stops before answering. The quoted mark is
+    indistinguishable from a real one, so a complete draft after it reads as a
+    reply. Only the model can remove that ambiguity, by not quoting its own
+    delimiters; the strict draft schema remains what decides whether whatever
+    is read may be stored.
     """
 
     for opener, closer in _REASONING_MARKS:
         opened = text.rfind(opener, 0, start)
         if opened == -1:
             continue
-        closed = text.rfind(closer)
-        if closed == -1 or closed < opened or closed >= start:
+        if opened > text.rfind(closer, 0, start):
+            return True
+        if text.rfind(closer) >= start:
             return True
     return False
 
