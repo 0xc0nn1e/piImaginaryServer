@@ -20,6 +20,7 @@ from audio_server.processing.analysis import (
     _sdk_client,
     classify_lmstudio_failure,
     require_single_loaded_model,
+    structured_payload,
 )
 from audio_server.processing.contracts import (
     AnalysisResult,
@@ -178,12 +179,7 @@ class LMStudioDailySummaryProvider:
                 response_format=_GenerationDailyDraft,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            if not bool(getattr(response, "structured", True)):
-                raise ValueError("LM Studio returned an unstructured response")
-            parsed = getattr(response, "parsed", None)
-            if not isinstance(parsed, Mapping):
-                raise ValueError("LM Studio structured response is missing parsed data")
-            return _DailyDraft.model_validate(parsed)
+            return _DailyDraft.model_validate(structured_payload(response))
         except ValidationError as exc:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.

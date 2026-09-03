@@ -6,7 +6,7 @@ Only the transcript text ever leaves this process. Audio never does.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -17,6 +17,7 @@ from audio_server.processing.analysis import (
     _sdk_client,
     classify_lmstudio_failure,
     require_single_loaded_model,
+    structured_payload,
 )
 from audio_server.processing.contracts import (
     AnalysisStatus,
@@ -115,12 +116,7 @@ class LMStudioTranslationProvider:
                 response_format=_GenerationTranslation,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            if not bool(getattr(response, "structured", True)):
-                raise ValueError("LM Studio returned an unstructured response")
-            parsed = getattr(response, "parsed", None)
-            if not isinstance(parsed, Mapping):
-                raise ValueError("LM Studio structured response is missing parsed data")
-            return _DraftTranslation.model_validate(parsed).zh_hk.strip()
+            return _DraftTranslation.model_validate(structured_payload(response)).zh_hk.strip()
         except ValidationError as exc:
             # Field paths and rule names only; the rejected value is model
             # output and must never reach the log.
@@ -128,6 +124,15 @@ class LMStudioTranslationProvider:
                 "LM Studio translation failed schema validation",
                 extra={"violations": _safe_violations(exc)},
             )
+            raise PermanentProcessingError(
+                code="lmstudio_translation_schema_invalid",
+                safe_message="LM Studio returned an invalid translation.",
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            # Analysis and the day summary already name an unreadable response
+            # this way. Letting it travel to the caller instead reported the
+            # same fault under a different code, which is how one broken
+            # response shape read as two unrelated failures.
             raise PermanentProcessingError(
                 code="lmstudio_translation_schema_invalid",
                 safe_message="LM Studio returned an invalid translation.",

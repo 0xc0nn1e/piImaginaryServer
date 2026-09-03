@@ -151,6 +151,24 @@ def test_an_oversized_reply_is_rejected_after_generation() -> None:
     assert caught.value.code == "lmstudio_translation_schema_invalid"
 
 
+def test_an_unreadable_response_is_named_the_same_way_analysis_names_it() -> None:
+    class UnreadableModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.prompts.append(prompt)
+            del kwargs
+            return SimpleNamespace(parsed=None, structured=True)
+
+    with pytest.raises(PermanentProcessingError) as caught:
+        _provider(FakeClient([UnreadableModel([])])).translate(
+            "recording-1", [_segment(0, "はい。")]
+        )
+
+    # One broken response shape used to surface here as lmstudio_translation_failed
+    # and in analysis as lmstudio_schema_invalid, which read as two unrelated
+    # faults while it was a single one.
+    assert caught.value.code == "lmstudio_translation_schema_invalid"
+
+
 def test_violations_never_carry_model_output() -> None:
     leaked = "モデルが返した本文"
     with pytest.raises(ValidationError) as caught:

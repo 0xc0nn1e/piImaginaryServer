@@ -313,12 +313,7 @@ class LMStudioAnalysisProvider:
                 response_format=_GenerationAnalysisDraft,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            if not bool(getattr(response, "structured", True)):
-                raise ValueError("LM Studio returned an unstructured response")
-            parsed = getattr(response, "parsed", None)
-            if not isinstance(parsed, Mapping):
-                raise ValueError("LM Studio structured response is missing parsed data")
-            return _AnalysisDraft.model_validate(parsed)
+            return _AnalysisDraft.model_validate(structured_payload(response))
         except ValidationError as exc:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.
@@ -369,6 +364,58 @@ def _safe_path(location: Sequence[object]) -> str:
         for part in location
     ]
     return ".".join(parts) or "<root>"
+
+
+def structured_payload(response: object) -> Mapping[str, object]:
+    """Return the structured object an LM Studio response carries.
+
+    The SDK is depended on by range, and what ``parsed`` holds has not been
+    stable across its releases: a plain mapping in some, the parsed instance of
+    the response format in others, the raw JSON text in others again. Reading
+    only one of those shapes turns a routine SDK upgrade into every analysis
+    and translation failing at once, so each is accepted here.
+
+    The SDK's own ``structured`` flag is read as a symptom, not as a gate. A
+    reply that carries a complete result while the flag disagrees is still a
+    result, and ``_AnalysisDraft`` -- not the flag -- is what decides whether
+    it may be stored. Refusing before looking also meant the shape that was
+    actually returned never reached the log, which is what left this failing
+    for days with nothing to read.
+    """
+
+    parsed = getattr(response, "parsed", None)
+    content = getattr(response, "content", None)
+    for candidate in (parsed, content):
+        payload = _as_mapping(candidate)
+        if payload is not None:
+            return payload
+    # The values are model output and must never be logged; their types, and
+    # the flag the SDK set, are not.
+    logger.warning(
+        "LM Studio structured response has an unreadable shape",
+        extra={
+            "response_type": type(response).__name__,
+            "parsed_type": type(parsed).__name__,
+            "content_type": type(content).__name__,
+            "structured_flag": bool(getattr(response, "structured", True)),
+        },
+    )
+    raise ValueError("LM Studio structured response is missing parsed data")
+
+
+def _as_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except ValueError:
+            return None
+        if isinstance(loaded, Mapping):
+            return loaded
+    return None
 
 
 def classify_lmstudio_failure(

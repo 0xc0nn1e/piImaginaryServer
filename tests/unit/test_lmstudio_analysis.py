@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any
@@ -218,7 +220,7 @@ def test_lmstudio_maps_authentication_failure_without_exposing_details() -> None
     [
         SimpleNamespace(parsed=None, structured=True),
         SimpleNamespace(parsed=_draft() | {"unexpected": True}, structured=True),
-        SimpleNamespace(parsed=_draft(), structured=False),
+        SimpleNamespace(parsed="not json at all", content=None, structured=False),
     ],
 )
 def test_lmstudio_rejects_missing_invalid_or_unstructured_output(response: object) -> None:
@@ -236,6 +238,76 @@ def test_lmstudio_rejects_missing_invalid_or_unstructured_output(response: objec
         provider.analyze("recording-id", [_segment()])
 
     assert caught.value.code == "lmstudio_schema_invalid"
+
+
+@pytest.mark.parametrize(
+    "response_for",
+    [
+        # A mapping, the shape the SDK returned when this was written.
+        lambda draft: SimpleNamespace(parsed=draft, structured=True),
+        # The parsed instance of the response format, which a later SDK hands
+        # back instead.
+        lambda draft: SimpleNamespace(
+            parsed=analysis._GenerationAnalysisDraft.model_validate(draft), structured=True
+        ),
+        # The raw JSON text.
+        lambda draft: SimpleNamespace(parsed=json.dumps(draft), structured=True),
+        # No parsed field at all, with the JSON only on the content.
+        lambda draft: SimpleNamespace(parsed=None, content=json.dumps(draft), structured=True),
+        # A complete result the SDK nonetheless flagged as unstructured. The
+        # flag is not the payload, and refusing over it is what took analysis
+        # down; the strict draft schema still decides what may be stored.
+        lambda draft: SimpleNamespace(parsed=draft, structured=False),
+    ],
+)
+def test_lmstudio_reads_every_shape_a_structured_response_has_come_back_as(
+    response_for: Callable[[dict[str, object]], object],
+) -> None:
+    class ShapedModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            return response_for(_draft())
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([ShapedModel(_draft())])),
+    )
+
+    # An SDK upgrade that moves the payload must not read as every analysis and
+    # translation on the server suddenly returning invalid output.
+    result = provider.analyze("recording-id", [_segment()])
+
+    assert result.status is AnalysisStatus.COMPLETED
+    assert result.data is not None
+
+
+def test_an_unreadable_response_names_its_shape_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class UnreadableModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            return SimpleNamespace(parsed=object(), content=None, structured=False)
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([UnreadableModel(_draft())])),
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger="audio_server.processing.analysis"),
+        pytest.raises(PermanentProcessingError),
+    ):
+        provider.analyze("recording-id", [_segment()])
+
+    # Without this the failure is silent, which is how an SDK whose reply
+    # changed shape read as "invalid analysis" for days with nothing to chase.
+    record = next(item for item in caplog.records if "unreadable shape" in item.getMessage())
+    assert record.parsed_type == "object"
+    assert record.content_type == "NoneType"
+    assert record.structured_flag is False
+    # The reply itself is model output and must never reach the log.
+    assert not hasattr(record, "parsed")
 
 
 def test_lmstudio_enforces_string_limits_after_structured_generation() -> None:
