@@ -10,27 +10,21 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from audio_server.db.models import (
     Analysis,
+    JobKind,
     JobStatus,
     ProcessingJob,
     Recording,
     RecordingStatus,
     TranscriptSegment,
 )
-from audio_server.db.models import (
-    AnalysisStatus as DatabaseAnalysisStatus,
-)
 from audio_server.jobs.queue import JobQueue
 from audio_server.jobs.worker import Worker, WorkerIntervals
 from audio_server.processing.contracts import (
-    AnalysisResult,
     AudioProbe,
     MergedTranscriptSegment,
     PipelineResult,
     ProcessingStage,
     StageCallback,
-)
-from audio_server.processing.contracts import (
-    AnalysisStatus as ProcessingAnalysisStatus,
 )
 from audio_server.services.storage import LocalStorageBackend
 from audio_server.worker_runtime import PipelineJobProcessor
@@ -72,10 +66,6 @@ class FakePipeline:
                     confidence=0.9,
                 ),
             ),
-            analysis=AnalysisResult(
-                status=ProcessingAnalysisStatus.SKIPPED,
-                provider="disabled",
-            ),
         )
 
 
@@ -106,7 +96,12 @@ def test_worker_pipeline_results_commit_atomically(
             client_metadata={},
             processing_status=RecordingStatus.QUEUED,
         )
-        job = ProcessingJob(recording_id=recording_id, available_at=now)
+        # An uploaded recording arrives with its LLM work already chained.
+        job = ProcessingJob(
+            recording_id=recording_id,
+            available_at=now,
+            follow_up_kind=JobKind.ANALYSIS,
+        )
         session.add_all([recording, job])
 
     queue = JobQueue(
@@ -134,7 +129,16 @@ def test_worker_pipeline_results_commit_atomically(
     with session_factory() as session:
         stored_recording = session.get(Recording, recording_id)
         stored_job = session.scalar(
-            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+            select(ProcessingJob).where(
+                ProcessingJob.recording_id == recording_id,
+                ProcessingJob.kind == JobKind.FULL,
+            )
+        )
+        follow_up = session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.recording_id == recording_id,
+                ProcessingJob.kind == JobKind.ANALYSIS,
+            )
         )
         segment = session.scalar(
             select(TranscriptSegment).where(TranscriptSegment.recording_id == recording_id)
@@ -145,5 +149,10 @@ def test_worker_pipeline_results_commit_atomically(
     assert stored_recording.processing_status is RecordingStatus.COMPLETED
     assert stored_job is not None and stored_job.status is JobStatus.COMPLETED
     assert segment is not None and segment.text == "integration result"
-    assert analysis is not None and analysis.status is DatabaseAnalysisStatus.SKIPPED
+    # The transcript is the transcription job's whole result. Its analysis is
+    # queued in the same transaction, so a crash here cannot leave a recording
+    # transcribed and never analysed.
+    assert analysis is None
+    assert follow_up is not None and follow_up.status is JobStatus.QUEUED
+    assert follow_up.follow_up_kind is JobKind.TRANSLATION
     assert not list(storage.work_root.rglob("processing.wav"))

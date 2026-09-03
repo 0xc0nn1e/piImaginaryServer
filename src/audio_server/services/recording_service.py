@@ -39,6 +39,7 @@ from audio_server.db.models import (
     TranscriptTranslation,
     TranslationSource,
 )
+from audio_server.jobs.queue import chained_follow_up
 from audio_server.processing.contracts import AudioPreprocessor, AudioProbe
 from audio_server.processing.errors import (
     PermanentProcessingError,
@@ -430,10 +431,6 @@ class RecordingService:
             analysis = session.scalar(
                 select(Analysis).where(Analysis.recording_id == recording_id).limit(1)
             )
-            if analysis is None:
-                raise RecordingServiceError(
-                    "analysis_not_ready", "Analysis is not available yet.", status_code=409
-                )
             job = session.scalar(
                 select(ProcessingJob)
                 .where(
@@ -443,6 +440,20 @@ class RecordingService:
                 .order_by(ProcessingJob.created_at.desc(), ProcessingJob.id.desc())
                 .limit(1)
             )
+            if analysis is None:
+                # A recording that has never been analysed keeps its reason on
+                # the job row. Reporting a job that gave up as "not ready yet"
+                # would describe a failure that is never coming back as work
+                # still in progress.
+                if job is not None and job.status is JobStatus.FAILED:
+                    raise RecordingServiceError(
+                        "analysis_failed",
+                        job.error_message or "Analysis could not be completed.",
+                        status_code=409,
+                    )
+                raise RecordingServiceError(
+                    "analysis_not_ready", "Analysis is not available yet.", status_code=409
+                )
             if job is not None and job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
                 is_current_result_job = job.id == analysis.job_id
                 failed_after_result = (
@@ -950,6 +961,9 @@ class RecordingService:
             job = ProcessingJob(
                 recording_id=recording.id,
                 kind=kind,
+                # Transcription hands its LLM work to the analysis worker; a
+                # job asked for by hand runs alone.
+                follow_up_kind=chained_follow_up(kind) if kind is JobKind.FULL else None,
                 status=JobStatus.QUEUED,
                 stage=JobStage.QUEUED,
                 max_attempts=self._max_attempts,
@@ -1119,6 +1133,7 @@ class RecordingService:
         job = ProcessingJob(
             recording_id=recording.id,
             kind=JobKind.FULL,
+            follow_up_kind=chained_follow_up(JobKind.FULL),
             status=JobStatus.QUEUED,
             stage=JobStage.QUEUED,
             max_attempts=self._max_attempts,
@@ -1203,6 +1218,7 @@ class RecordingService:
         job = ProcessingJob(
             recording_id=identifier,
             kind=JobKind.FULL,
+            follow_up_kind=chained_follow_up(JobKind.FULL),
             status=JobStatus.QUEUED,
             stage=JobStage.QUEUED,
             max_attempts=self._max_attempts,

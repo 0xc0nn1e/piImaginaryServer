@@ -1,25 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
-from audio_server.processing.analysis import (
-    DisabledAnalysisProvider,
-    DisabledTranslationProvider,
-)
 from audio_server.processing.contracts import (
-    AnalysisResult,
-    AnalysisStatus,
     AudioProbe,
     DiarizationResult,
-    MergedTranscriptSegment,
     ProcessingStage,
     SpeakerTurn,
     TranscriptionResult,
     TranscriptionSegment,
-    TranslationResult,
     WordTiming,
 )
 from audio_server.processing.errors import ProcessingError, RetryableProcessingError
@@ -83,48 +74,16 @@ class FakeDiarizationProvider:
         return DiarizationResult(exclusive_turns=(turn,), regular_turns=(turn,))
 
 
-class FailingAnalysisProvider:
-    @property
-    def name(self) -> str:
-        return "fake-llm"
-
-    def analyze(
-        self,
-        recording_id: str,
-        segments: Sequence[MergedTranscriptSegment],
-    ) -> AnalysisResult:
-        del recording_id, segments
-        raise RuntimeError("provider output must not be exposed")
-
-
-class FailingTranslationProvider:
-    @property
-    def name(self) -> str:
-        return "fake-llm"
-
-    def translate(
-        self,
-        recording_id: str,
-        segments: Sequence[MergedTranscriptSegment],
-    ) -> TranslationResult:
-        del recording_id, segments
-        raise RuntimeError("provider output must not be exposed")
-
-
 def _pipeline(
     *,
     audio: FakeAudioProcessor | None = None,
     transcription: object | None = None,
     diarization: object | None = None,
-    analysis: object | None = None,
-    translation: object | None = None,
 ) -> ProcessingPipeline:
     return ProcessingPipeline(
         audio_processor=audio or FakeAudioProcessor(),
         transcription_provider=transcription or FakeTranscriptionProvider(),  # type: ignore[arg-type]
         diarization_provider=diarization or FakeDiarizationProvider(),  # type: ignore[arg-type]
-        analysis_provider=analysis or DisabledAnalysisProvider(),  # type: ignore[arg-type]
-        translation_provider=translation or DisabledTranslationProvider(),  # type: ignore[arg-type]
     )
 
 
@@ -141,7 +100,15 @@ def test_pipeline_runs_all_stages_with_injected_providers(tmp_path: Path) -> Non
         stage_callback=stages.append,
     )
 
-    assert stages == list(ProcessingStage)
+    # Analysis and translation are jobs of their own, so the transcription
+    # pipeline walks only as far as the finished transcript.
+    assert stages == [
+        ProcessingStage.PREPROCESSING,
+        ProcessingStage.TRANSCRIBING,
+        ProcessingStage.DIARIZING,
+        ProcessingStage.MERGING,
+        ProcessingStage.COMPLETED,
+    ]
     assert audio.probed == source
     assert audio.normalized == (source, tmp_path / "work" / "processing.wav")
     assert result.recording_id == "recording-id"
@@ -150,25 +117,6 @@ def test_pipeline_runs_all_stages_with_injected_providers(tmp_path: Path) -> Non
     assert [(segment.speaker_label, segment.text) for segment in result.transcript] == [
         ("SPEAKER_00", "hello")
     ]
-    assert result.analysis.status is AnalysisStatus.SKIPPED
-
-
-def test_analysis_failure_does_not_discard_completed_transcript(tmp_path: Path) -> None:
-    stages: list[ProcessingStage] = []
-    pipeline = _pipeline(analysis=FailingAnalysisProvider())
-
-    result = pipeline.run(
-        recording_id="recording-id",
-        source_path=tmp_path / "original.flac",
-        work_dir=tmp_path / "work",
-        stage_callback=stages.append,
-    )
-
-    assert result.transcript[0].text == "hello"
-    assert result.analysis.status is AnalysisStatus.FAILED
-    assert result.analysis.error_code == "analysis_failed"
-    assert result.analysis.error_message == "Transcript analysis failed."
-    assert stages[-1] is ProcessingStage.COMPLETED
 
 
 def test_unknown_provider_failure_is_safe_and_retryable(tmp_path: Path) -> None:
@@ -241,24 +189,3 @@ def test_load_providers_warms_optional_heavy_dependencies() -> None:
 
     assert transcription.loaded is True
     assert diarization.loaded is True
-
-
-def test_translation_failure_does_not_discard_completed_transcript(tmp_path: Path) -> None:
-    stages: list[ProcessingStage] = []
-    pipeline = _pipeline(translation=FailingTranslationProvider())
-
-    result = pipeline.run(
-        recording_id="recording-id",
-        source_path=tmp_path / "original.flac",
-        work_dir=tmp_path / "work",
-        stage_callback=stages.append,
-    )
-
-    # Translation is optional. Letting it take the transcript down would lose
-    # hours of transcription over an LLM that returned the wrong shape.
-    assert result.transcript[0].text == "hello"
-    assert result.translation is not None
-    assert result.translation.status is AnalysisStatus.FAILED
-    assert result.translation.error_code == "translation_failed"
-    assert "provider output" not in (result.translation.error_message or "")
-    assert stages[-1] is ProcessingStage.COMPLETED

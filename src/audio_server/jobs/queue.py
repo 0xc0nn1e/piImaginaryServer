@@ -200,6 +200,87 @@ def _append_job_activity(
     )
 
 
+# A job that reads the committed transcript starts at the stage it will spend
+# its whole life in; only transcription walks through stages of its own.
+_CLAIMED_STAGE = {
+    JobKind.ANALYSIS: JobStage.ANALYZING,
+    JobKind.DAILY_SUMMARY: JobStage.ANALYZING,
+    JobKind.TRANSLATION: JobStage.TRANSLATING,
+}
+
+
+def chained_follow_up(kind: JobKind) -> JobKind | None:
+    """The job a recording's pipeline runs after ``kind`` when it is chained.
+
+    Transcription commits the transcript and then hands the LLM work to the
+    analysis worker. Analysis leads because it is what a reviewer waits for;
+    the per-sentence translation is far longer and can trail behind it. Each
+    step therefore owns its own retry budget, so a transient LM Studio failure
+    costs a retry instead of the whole result.
+
+    Only the chain uses this. A job queued by hand from the recording or day
+    page carries no follow-up, so pressing one button never sets off the
+    other's work.
+    """
+
+    if kind is JobKind.FULL:
+        return JobKind.ANALYSIS
+    if kind is JobKind.ANALYSIS:
+        return JobKind.TRANSLATION
+    return None
+
+
+def _queue_follow_up(
+    session: Session,
+    job: ProcessingJob,
+    *,
+    max_attempts: int,
+    occurred_at: datetime,
+) -> ProcessingJob | None:
+    """Queue the job that continues a recording's pipeline, in this transaction.
+
+    The caller must already have flushed ``job`` into a terminal status:
+    ``uq_processing_jobs_one_active_recording`` allows one queued or running
+    job per recording, so the successor can only be inserted once this one no
+    longer counts as active.
+    """
+
+    follow_up_kind = job.follow_up_kind
+    recording_id = job.recording_id
+    if follow_up_kind is None or recording_id is None:
+        return None
+
+    # A recording's timeline is ordered by time and then by a random id, so an
+    # identical timestamp would show this queueing before the finish that
+    # caused it. The successor is queued a moment later, which is also true.
+    queued_at = occurred_at + timedelta(microseconds=1)
+    follow_up = ProcessingJob(
+        recording_id=recording_id,
+        kind=follow_up_kind,
+        follow_up_kind=chained_follow_up(follow_up_kind),
+        status=JobStatus.QUEUED,
+        stage=JobStage.QUEUED,
+        attempt_count=0,
+        max_attempts=max_attempts,
+        available_at=queued_at,
+    )
+    session.add(follow_up)
+    session.flush()
+    _append_job_activity(
+        session,
+        recording_id=recording_id,
+        job_id=follow_up.id,
+        job_kind=follow_up_kind,
+        event_type=ProcessingActivityType.JOB_QUEUED,
+        job_status=JobStatus.QUEUED,
+        stage=JobStage.QUEUED,
+        attempt_count=0,
+        max_attempts=max_attempts,
+        occurred_at=queued_at,
+    )
+    return follow_up
+
+
 def _active_job_statement(recording_id: uuid.UUID) -> Select[tuple[ProcessingJob]]:
     return select(ProcessingJob).where(
         ProcessingJob.recording_id == recording_id,
@@ -240,6 +321,8 @@ def create_processing_job(
     job = ProcessingJob(
         recording_id=recording_id,
         kind=kind,
+        # Transcription always chains; a job asked for by hand never does.
+        follow_up_kind=chained_follow_up(kind) if kind is JobKind.FULL else None,
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
         attempt_count=0,
@@ -341,6 +424,7 @@ def retry_failed_recording(
     job = ProcessingJob(
         recording_id=recording_id,
         kind=JobKind.FULL,
+        follow_up_kind=chained_follow_up(JobKind.FULL),
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,
         attempt_count=0,
@@ -419,11 +503,7 @@ class JobQueue:
                 return None
 
             job.status = JobStatus.PROCESSING
-            job.stage = (
-                JobStage.ANALYZING
-                if job.kind in {JobKind.ANALYSIS, JobKind.DAILY_SUMMARY}
-                else JobStage.PREPROCESSING
-            )
+            job.stage = _CLAIMED_STAGE.get(job.kind, JobStage.PREPROCESSING)
             job.attempt_count += 1
             job.worker_id = self.worker_id
             job.claim_token = token
@@ -572,6 +652,16 @@ class JobQueue:
                 max_attempts=job.max_attempts,
                 occurred_at=completed_at,
             )
+            # The successor is queued in this transaction, so a worker that dies
+            # between committing a transcript and asking for its analysis cannot
+            # leave the recording half finished.
+            session.flush()
+            _queue_follow_up(
+                session,
+                job,
+                max_attempts=job.max_attempts,
+                occurred_at=completed_at,
+            )
 
     def fail(
         self,
@@ -654,6 +744,18 @@ class JobQueue:
                     error_type=job.error_type,
                     safe_message=job.error_message,
                 )
+                if job.kind is not JobKind.FULL:
+                    # Analysis and translation are independent readings of the
+                    # same transcript, so one giving up does not cancel the
+                    # other. Transcription is different: a run that failed
+                    # committed no transcript for the chain to work from.
+                    session.flush()
+                    _queue_follow_up(
+                        session,
+                        job,
+                        max_attempts=job.max_attempts,
+                        occurred_at=failed_at,
+                    )
         return will_retry
 
     def recover_expired(
@@ -736,6 +838,16 @@ class JobQueue:
                         update(Recording)
                         .where(Recording.id == job.recording_id)
                         .values(processing_status=recording_status)
+                    )
+                elif not can_retry:
+                    # A worker that died holding an analysis lease must not take
+                    # the translation down with it.
+                    session.flush()
+                    _queue_follow_up(
+                        session,
+                        job,
+                        max_attempts=job.max_attempts,
+                        occurred_at=recovered_at,
                     )
         return RecoverySummary(requeued=requeued, failed=failed)
 

@@ -42,12 +42,13 @@ const ja = {
   "queue.loading": "キューを読み込んでいます…",
   "queue.error": "キューを取得できませんでした。",
   "queue.kind.full": "文字起こし",
-  "queue.kind.analysis": "再分析",
+  "queue.kind.analysis": "分析",
+  "queue.kind.translation": "広東語訳",
   "queue.attempt": "試行",
   "queue.startedAt": "開始",
   "queue.retryAt": "再試行予定",
   "queue.ready": "取得待ち",
-  "queue.separateWorkers": "文字起こしと分析は別のワーカーが処理するため、それぞれ独立した順番で進みます。",
+  "queue.separateWorkers": "文字起こしが終わると、分析と広東語訳が別のワーカーのジョブとして順に実行されます。",
   "nav.bookmarksSub": "Bookmarks",
   "nav.serviceStatus": "サービス状態",
   "nav.privateServer": "プライベートサーバー",
@@ -201,8 +202,9 @@ const ja = {
   "detail.waitingJobData": "ジョブ情報を待機中",
   "detail.jobStatus": "ジョブ状態",
   "detail.jobKind": "処理の種類",
-  "detail.jobFull": "文字起こし＋分析",
-  "detail.jobAnalysis": "分析のみ",
+  "detail.jobFull": "文字起こし",
+  "detail.jobAnalysis": "分析",
+  "detail.jobTranslation": "広東語訳",
   "detail.attempts": "試行回数",
   "detail.processingStarted": "処理開始",
   "detail.processingFailed": "処理を完了できませんでした",
@@ -212,6 +214,7 @@ const ja = {
   "detail.safeEventsOnly": "安全な処理イベントのみ表示",
   "detail.noEvents": "処理イベントはまだありません。",
   "detail.unknownStage": "ステージ不明",
+  "detail.jobUnknown": "処理の種類が不明",
   "detail.unknownStatus": "状態不明",
   "detail.attemptCount": "{attempt} / {max} 回目",
   "detail.nextAttempt": "次回の試行：{time}",
@@ -342,6 +345,7 @@ const ja = {
   "stage.transcribing": "文字起こし",
   "stage.diarizing": "話者分離",
   "stage.merging": "文字起こしを統合",
+  "stage.translating": "広東語に翻訳",
   "stage.analyzing": "内容を分析",
   "stage.completed": "処理完了",
   "duration.hours": "{hours}時間 {minutes}分",
@@ -381,12 +385,13 @@ const zhHK: Record<TranslationKey, string> = {
   "queue.loading": "正在載入隊列…",
   "queue.error": "未能取得隊列。",
   "queue.kind.full": "轉錄",
-  "queue.kind.analysis": "重新分析",
+  "queue.kind.analysis": "分析",
+  "queue.kind.translation": "廣東話翻譯",
   "queue.attempt": "第",
   "queue.startedAt": "開始於",
   "queue.retryAt": "重試時間",
   "queue.ready": "等待取得",
-  "queue.separateWorkers": "轉錄同分析由唔同嘅工作程序處理，所以兩邊各自獨立排隊。",
+  "queue.separateWorkers": "轉錄完成之後，分析同廣東話翻譯會交畀另一個工作程序，各自做一件工作。",
   "nav.bookmarksSub": "Bookmarks",
   "nav.serviceStatus": "服務狀態",
   "nav.privateServer": "私人伺服器",
@@ -540,8 +545,9 @@ const zhHK: Record<TranslationKey, string> = {
   "detail.waitingJobData": "等待工作資料",
   "detail.jobStatus": "工作狀態",
   "detail.jobKind": "處理類型",
-  "detail.jobFull": "轉錄及分析",
-  "detail.jobAnalysis": "只作分析",
+  "detail.jobFull": "轉錄",
+  "detail.jobAnalysis": "分析",
+  "detail.jobTranslation": "廣東話翻譯",
   "detail.attempts": "嘗試次數",
   "detail.processingStarted": "開始處理",
   "detail.processingFailed": "處理未能完成",
@@ -551,6 +557,7 @@ const zhHK: Record<TranslationKey, string> = {
   "detail.safeEventsOnly": "只顯示安全的處理事件",
   "detail.noEvents": "暫時沒有處理事件。",
   "detail.unknownStage": "階段不詳",
+  "detail.jobUnknown": "處理類型不詳",
   "detail.unknownStatus": "狀態不詳",
   "detail.attemptCount": "第 {attempt} / {max} 次",
   "detail.nextAttempt": "下次嘗試：{time}",
@@ -681,6 +688,7 @@ const zhHK: Record<TranslationKey, string> = {
   "stage.transcribing": "語音轉文字",
   "stage.diarizing": "分辨講者",
   "stage.merging": "合併逐字稿",
+  "stage.translating": "翻譯做廣東話",
   "stage.analyzing": "內容分析",
   "stage.completed": "處理完成",
   "duration.hours": "{hours} 小時 {minutes} 分鐘",
@@ -764,6 +772,18 @@ export function statusLabelKey(status: string): TranslationKey {
 
 export function stageLabelKey(stage: string): TranslationKey {
   return `stage.${stage}` as TranslationKey;
+}
+
+const jobKindKeys: Record<string, TranslationKey> = {
+  full: "detail.jobFull",
+  analysis: "detail.jobAnalysis",
+  translation: "detail.jobTranslation",
+};
+
+export function jobKindLabelKey(kind: string): TranslationKey {
+  // A day summary belongs to no recording, so it never reaches these views;
+  // anything unrecognised is named as unknown rather than as transcription.
+  return jobKindKeys[kind] ?? "detail.jobUnknown";
 }
 
 export function activityLabelKey(eventType: string): TranslationKey {

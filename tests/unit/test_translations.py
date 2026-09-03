@@ -21,7 +21,6 @@ from audio_server.db.models import (
     TranslationSource,
 )
 from audio_server.processing.contracts import (
-    AnalysisResult,
     AnalysisStatus,
     AudioProbe,
     MergedTranscriptSegment,
@@ -239,8 +238,6 @@ def test_editing_the_transcript_marks_translations_stale_but_keeps_them(
 def _pipeline_result(
     recording_id: uuid.UUID,
     texts: list[str] | list[tuple[str, float]],
-    *,
-    translation: TranslationResult | None = None,
 ) -> PipelineResult:
     # Reprocessing re-reads the same audio, so a line keeps its real timestamp
     # even when the new pass splits the speech differently.
@@ -267,8 +264,6 @@ def _pipeline_result(
             )
             for index, (text, start) in enumerate(timed)
         ),
-        analysis=AnalysisResult(status=AnalysisStatus.SKIPPED, provider="disabled"),
-        translation=translation,
     )
 
 

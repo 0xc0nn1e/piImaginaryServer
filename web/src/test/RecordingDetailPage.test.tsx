@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -222,6 +222,252 @@ describe("recording transcript states", () => {
     expect(
       await screen.findByRole("heading", { name: "處理已完成，但沒有語音內容" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows why a first analysis gave up instead of an endless preparing state", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/analysis")) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: "analysis_failed",
+                message: "LM Studio is temporarily unavailable.",
+              },
+            },
+            409,
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    // The analysis job exhausted its attempts and left no row behind. Nothing
+    // is going to arrive on its own, so the page must not keep promising it.
+    expect(
+      await screen.findByText("LM Studio is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+  });
+
+  it("re-asks for an analysis that was still preparing when the tab was left", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    let gaveUp = false;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/analysis")) {
+        const error = gaveUp
+          ? { code: "analysis_failed", message: "LM Studio is temporarily unavailable." }
+          : { code: "analysis_not_ready", message: "Analysis is not available yet." };
+        return Promise.resolve(jsonResponse({ error }, 409));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+    await screen.findByText("分析仍在準備中");
+
+    // The job gives up while the reader is looking at something else, so no
+    // polling is left running to notice it.
+    gaveUp = true;
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(
+      await screen.findByText("LM Studio is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+  });
+
+  it("does not let a slow earlier analysis answer bury the newer failure", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    let releaseFirstRead: (() => void) | null = null;
+    let reads = 0;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/analysis")) {
+        reads += 1;
+        if (reads === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirstRead = () =>
+              resolve(
+                jsonResponse(
+                  {
+                    error: {
+                      code: "analysis_not_ready",
+                      message: "Analysis is not available yet.",
+                    },
+                  },
+                  409,
+                ),
+              );
+          });
+        }
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: "analysis_failed",
+                message: "LM Studio is temporarily unavailable.",
+              },
+            },
+            409,
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(
+      await screen.findByText("LM Studio is temporarily unavailable."),
+    ).toBeInTheDocument();
+
+    // The first read finally answers, describing a moment the server has since
+    // left behind. Letting it land would put the page back on a promise that
+    // nothing is going to keep.
+    await act(async () => {
+      releaseFirstRead?.();
+    });
+
+    expect(screen.getByText("LM Studio is temporarily unavailable.")).toBeInTheDocument();
+    expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+  });
+
+  it("does not let an analysis read from before a transcript edit hide the staleness", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    document.cookie = "audio_server_csrf=synthetic-csrf; Path=/; SameSite=Strict";
+    const edited = {
+      recording_id: recordingId,
+      status: "completed",
+      revision: 2,
+      text: "",
+      segments: [
+        {
+          id: "segment-1",
+          sequence: 0,
+          speaker_label: "SPEAKER_00",
+          start_time: 0,
+          end_time: 1,
+          text: "会議の説明です。",
+          language: "ja",
+          confidence: null,
+          has_overlap: false,
+        },
+      ],
+      translations: [],
+      translation_revision: 0,
+      furigana: {},
+    };
+    const base = mockDetailApi(jsonResponse({ ...edited, revision: 1 }));
+    let releaseFirstRead: (() => void) | null = null;
+    let reads = 0;
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/transcript") && init?.method === "PUT") {
+        return Promise.resolve(jsonResponse(edited));
+      }
+      if (path.endsWith("/analysis")) {
+        reads += 1;
+        if (reads === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirstRead = () => resolve(jsonResponse(completedAnalysis));
+          });
+        }
+        return Promise.resolve(jsonResponse({ ...completedAnalysis, status: "stale", revision: 1 }));
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    // The reader edits the transcript while that first read is still open.
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+    await browser.click(screen.getByRole("button", { name: "儲存" }));
+    await screen.findByText("逐字稿已儲存；分析結果需要重新產生。");
+
+    // It answers with the analysis of the words that have just been replaced.
+    await act(async () => {
+      releaseFirstRead?.();
+    });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(
+      await screen.findByText("逐字稿已修改，這份分析已過時，請重新分析。"),
+    ).toBeInTheDocument();
+  });
+
+  it("names the Cantonese translation job the transcript hands off to", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/status")) {
+        return Promise.resolve(
+          jsonResponse({
+            recording_id: recordingId,
+            status: "completed",
+            job: {
+              id: "job-3",
+              kind: "translation",
+              status: "processing",
+              stage: "translating",
+              attempt_count: 1,
+              max_attempts: 3,
+              available_at: "2026-08-10T00:01:00Z",
+              started_at: "2026-08-10T00:01:01Z",
+              finished_at: null,
+              error: null,
+            },
+          }),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+
+    // Transcription now hands its LLM work to jobs of its own, so a reader has
+    // to be told which one is running rather than shown a blank label.
+    expect(await screen.findByRole("heading", { name: "翻譯做廣東話" })).toBeInTheDocument();
+    expect(screen.getByText("廣東話翻譯")).toBeInTheDocument();
   });
 
   it("renders truthful fallbacks for historical activity without stage or status", async () => {

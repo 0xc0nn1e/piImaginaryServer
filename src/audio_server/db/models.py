@@ -181,6 +181,12 @@ class ProcessingJob(Base):
             "kind IN ('full', 'analysis', 'translation', 'daily_summary')",
             name="processing_job_kind",
         ),
+        # Only the LLM steps are ever chained after a job; a transcription or a
+        # day summary is never queued as somebody else's follow-up.
+        CheckConstraint(
+            "follow_up_kind IS NULL OR follow_up_kind IN ('analysis', 'translation')",
+            name="processing_job_follow_up_kind",
+        ),
         # A job is scoped to exactly one thing. Recording work names its
         # recording; a day summary names its day and belongs to no single
         # recording, so the two columns are mutually exclusive.
@@ -230,6 +236,14 @@ class ProcessingJob(Base):
         default=JobKind.FULL,
         server_default="full",
         nullable=False,
+    )
+    # What this recording's pipeline runs next once this job reaches a terminal
+    # state. Transcription hands its LLM work to the analysis worker instead of
+    # running it inline, so a transient LM Studio failure is retried on its own
+    # budget rather than silently lost alongside a completed transcript. NULL on
+    # a job queued by hand, so one button never sets off the other's work.
+    follow_up_kind: Mapped[JobKind | None] = mapped_column(
+        enum_column(JobKind, name="processing_job_follow_up_kind")
     )
     status: Mapped[JobStatus] = mapped_column(
         enum_column(JobStatus, name="job_status"), default=JobStatus.QUEUED, nullable=False

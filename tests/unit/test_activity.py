@@ -121,11 +121,14 @@ def test_queue_events_are_chronological_idempotent_and_exclude_heartbeats(
             offset=0,
         )
     assert events is not None
+    # The transcription job finishes by queueing the analysis that reads its
+    # transcript, so the recording's timeline carries that hand-off too.
     assert [event.event_type for event in events] == [
         ProcessingActivityType.JOB_QUEUED,
         ProcessingActivityType.PROCESSING_STARTED,
         ProcessingActivityType.STAGE_STARTED,
         ProcessingActivityType.PROCESSING_COMPLETED,
+        ProcessingActivityType.JOB_QUEUED,
     ]
     assert [event.occurred_at for event in events] == sorted(event.occurred_at for event in events)
     assert all(event.event_type.value != "heartbeat" for event in events)

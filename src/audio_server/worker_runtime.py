@@ -275,32 +275,21 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
             ]
         )
         recording.transcript_revision += 1
-        analysis_status = AnalysisStatus(result.analysis.status.value)
+        # The words the last analysis was written from have just been replaced.
+        # The analysis job queued behind this one writes the replacement; until
+        # it commits, the previous reading is flagged rather than cleared, so a
+        # recording is never left with nothing while the model works.
         analysis = session.scalar(
             select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
         )
-        if analysis is None:
-            analysis = Analysis(
-                recording_id=recording_id,
-                job_id=claim.id,
-                provider=result.analysis.provider,
-                status=analysis_status,
-            )
-            session.add(analysis)
-        analysis.job_id = claim.id
-        analysis.provider = result.analysis.provider
-        analysis.model = result.analysis.model
-        analysis.schema_version = str(result.analysis.schema_version)
-        analysis.status = analysis_status
-        analysis.result = dict(result.analysis.data) if result.analysis.data is not None else None
-        analysis.error_code = result.analysis.error_code
-        analysis.error_message = result.analysis.error_message
-        analysis.completed_at = datetime.now(UTC)
-        recording.analysis_revision += 1
+        if analysis is not None and analysis.status is AnalysisStatus.COMPLETED:
+            analysis.status = AnalysisStatus.STALE
+            recording.analysis_revision += 1
         _carry_manual_translations(
             session, recording_id, result.transcript, preserved
         )
-        _write_translations(session, recording_id, result.translation)
+        # Machine translations belonged to the segments just deleted; the
+        # translation job at the end of the chain writes them again.
         recording.translation_revision += 1
 
     return persist
@@ -563,6 +552,12 @@ def _analysis_result_persister(claim: ClaimedJob, result: AnalysisResult) -> Res
             select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
         )
         status = AnalysisStatus(result.status.value)
+        # A run that produced no reading must not erase the one the recording
+        # already has. The job row carries why this attempt came back empty;
+        # the last good analysis stands until a replacement succeeds.
+        keeps_previous = analysis is not None and analysis.result is not None
+        if status is not AnalysisStatus.COMPLETED and keeps_previous:
+            return
         if analysis is None:
             analysis = Analysis(
                 recording_id=recording_id,
@@ -653,11 +648,7 @@ def build_worker(worker_index: int) -> Worker:
                 daily_summary_provider=daily_summary_provider,
                 daily_service=daily_service,
             )
-        pipeline = _build_pipeline(
-            settings,
-            analysis_provider=analysis_provider,
-            translation_provider=translation_provider,
-        )
+        pipeline = _build_pipeline(settings)
         pipeline.load_providers()
         return PipelineJobProcessor(
             session_factory=database.session_factory,
@@ -688,12 +679,9 @@ def _parse_job_kinds(value: str) -> frozenset[JobKind] | None:
     return kinds or None
 
 
-def _build_pipeline(
-    settings: Settings,
-    *,
-    analysis_provider: AnalysisProvider | None = None,
-    translation_provider: TranslationProvider | None = None,
-) -> ProcessingPipeline:
+def _build_pipeline(settings: Settings) -> ProcessingPipeline:
+    """Build the transcription half of the worker; the LLM half is queued."""
+
     audio_processor = AudioProcessor(
         FFmpegSettings(
             ffmpeg_binary=settings.ffmpeg_binary,
@@ -728,8 +716,6 @@ def _build_pipeline(
         audio_processor=audio_processor,
         transcription_provider=transcription_provider,
         diarization_provider=diarization_provider,
-        analysis_provider=analysis_provider or _build_analysis_provider(settings),
-        translation_provider=translation_provider or _build_translation_provider(settings),
     )
 
 

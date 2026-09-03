@@ -140,6 +140,38 @@ def _queue(
     )
 
 
+def test_completing_transcription_queues_its_analysis_under_the_active_job_index(
+    empty_database: sessionmaker[Session],
+) -> None:
+    recording_id, _job_id = _add_recording_with_job(empty_database)
+    queue = _queue(empty_database, "chain-worker")
+
+    claim = queue.claim_next()
+    assert claim is not None
+    # The successor is inserted in the same transaction as the completion, so
+    # PostgreSQL's partial unique index has to see this job leave the active
+    # set first. Getting the order wrong fails here and nowhere else.
+    queue.complete(claim)
+
+    with empty_database() as session:
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob)
+                .where(ProcessingJob.recording_id == recording_id)
+                .order_by(ProcessingJob.available_at)
+            )
+        )
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.ANALYSIS]
+    assert jobs[0].status is JobStatus.COMPLETED
+    assert jobs[1].status is JobStatus.QUEUED
+    assert jobs[1].follow_up_kind is JobKind.TRANSLATION
+
+    analysis_claim = queue.claim_next()
+    assert analysis_claim is not None
+    assert analysis_claim.kind is JobKind.ANALYSIS
+    assert analysis_claim.stage is JobStage.ANALYZING
+
+
 def test_skip_locked_allows_another_worker_to_claim_next_job(
     empty_database: sessionmaker[Session],
 ) -> None:

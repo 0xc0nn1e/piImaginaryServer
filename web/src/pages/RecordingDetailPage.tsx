@@ -30,6 +30,7 @@ import { formatBytes, formatDateTime, formatDuration, formatTimestamp } from "..
 import {
   type TranslationKey,
   activityLabelKey,
+  jobKindLabelKey,
   stageLabelKey,
   statusLabelKey,
   useI18n,
@@ -109,6 +110,8 @@ export function RecordingDetailPage() {
     (status.job.status === "queued" || status.job.status === "processing");
 
   const [analysisDraft, setAnalysisDraft] = useState<AnalysisResultV2 | null>(null);
+  const analysisKind = useRef<AnalysisState["kind"]>("idle");
+  const analysisRequest = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -255,18 +258,42 @@ export function RecordingDetailPage() {
     return nextStatus;
   }, [id]);
 
+  // Any write that does not come from a read retires the reads already in
+  // flight. Each of them carries an analysis from before this write, and
+  // letting one land would put a superseded reading back on screen -- or hide
+  // that the transcript underneath it has since changed.
+  const replaceAnalysis = useCallback((next: AnalysisState) => {
+    analysisRequest.current += 1;
+    setAnalysis(next);
+  }, []);
+
   const loadAnalysis = useCallback(async () => {
-    setAnalysis({ kind: "loading" });
+    // Polling, reopening the tab, and a manual reanalysis all ask at once, and
+    // an answer can arrive after a newer one. Only the newest request may
+    // write, or a slow "not ready yet" lands last and buries the failure that
+    // came after it.
+    const request = (analysisRequest.current += 1);
+    const settle = (next: AnalysisState) => {
+      if (analysisRequest.current === request) setAnalysis(next);
+    };
+    settle({ kind: "loading" });
     try {
-      setAnalysis({ kind: "ready", data: await getAnalysis(id) });
+      settle({ kind: "ready", data: await getAnalysis(id) });
     } catch (caught: unknown) {
       if (caught instanceof ApiError && caught.status === 409) {
-        setAnalysis({ kind: "pending" });
+        // A recording whose first analysis gave up has no analysis row to
+        // carry the reason. Calling that "still preparing" would describe a
+        // failure that is never coming back on its own as work in progress.
+        settle(
+          caught.code === "analysis_failed"
+            ? { kind: "error", message: caught.message }
+            : { kind: "pending" },
+        );
       } else if (caught instanceof ApiError && caught.status === 401) {
         invalidate();
         navigate("/login", { replace: true });
       } else {
-        setAnalysis({ kind: "error", message: t("analysis.loadError") });
+        settle({ kind: "error", message: t("analysis.loadError") });
       }
     }
   }, [id, invalidate, navigate, t]);
@@ -355,8 +382,21 @@ export function RecordingDetailPage() {
   }, [id, invalidate, navigate, status?.status, t, tab, transcriptRefreshKey]);
 
   useEffect(() => {
-    if (tab === "analysis" && analysis.kind === "idle") void loadAnalysis();
-  }, [analysis.kind, loadAnalysis, tab]);
+    analysisKind.current = analysis.kind;
+  }, [analysis.kind]);
+
+  useEffect(() => {
+    if (tab !== "analysis") return;
+    // Anything short of a result is a snapshot of a job that has since moved
+    // on, and polling stops as soon as that job reaches a terminal state. So
+    // reopening the tab asks again rather than repeating an answer that can
+    // no longer change on its own -- otherwise an analysis that gave up while
+    // the reader was on another tab stays "still preparing" until a reload.
+    // Read through a ref: depending on the state this sets would re-run the
+    // effect on its own result.
+    if (analysisKind.current === "ready") return;
+    void loadAnalysis();
+  }, [loadAnalysis, tab]);
 
   const sortedActivity = useMemo(
     () =>
@@ -518,7 +558,8 @@ export function RecordingDetailPage() {
       const saved = await updateTranscript(id, transcriptDraft);
       setTranscript({ kind: "ready", data: saved });
       setTranscriptDraft(null);
-      setAnalysis({ kind: "idle" });
+      // The edit marked the stored analysis stale, so it has to be read again.
+      replaceAnalysis({ kind: "idle" });
       setMutationMessage(t("detail.transcriptSaved"));
     } catch (caught: unknown) {
       handleMutationError(caught, t("detail.transcriptSaveError"));
@@ -532,7 +573,7 @@ export function RecordingDetailPage() {
     setMutationPending("analysis");
     try {
       const saved = await updateAnalysis(id, analysis.data.revision, analysisDraft);
-      setAnalysis({ kind: "ready", data: saved });
+      replaceAnalysis({ kind: "ready", data: saved });
       setAnalysisDraft(null);
       setMutationMessage(t("analysis.saved"));
     } catch (caught: unknown) {
@@ -682,7 +723,7 @@ export function RecordingDetailPage() {
                 <div className="progress-track" aria-hidden="true"><span className={`progress-${status.job.stage}`} /></div>
                 <dl className="detail-list compact">
                   <div><dt>{t("detail.jobStatus")}</dt><dd>{t(statusLabelKey(status.job.status))}</dd></div>
-                  <div><dt>{t("detail.jobKind")}</dt><dd>{status.job.kind === "analysis" ? t("detail.jobAnalysis") : t("detail.jobFull")}</dd></div>
+                  <div><dt>{t("detail.jobKind")}</dt><dd>{t(jobKindLabelKey(status.job.kind))}</dd></div>
                   <div><dt>{t("detail.attempts")}</dt><dd>{status.job.attempt_count} / {status.job.max_attempts}</dd></div>
                   <div><dt>{t("detail.processingStarted")}</dt><dd>{formatDateTime(status.job.started_at, locale)}</dd></div>
                 </dl>
@@ -701,7 +742,7 @@ export function RecordingDetailPage() {
               <li key={item.id}>
                 <span className={`timeline-dot status-${item.job_status ?? "unknown"}`} aria-hidden="true" />
                 <div><div className="timeline-heading"><strong>{t(activityLabelKey(item.event_type))}</strong><time dateTime={item.occurred_at}>{formatDateTime(item.occurred_at, locale)}</time></div>
-                  <p>{item.stage ? t(stageLabelKey(item.stage)) : t("detail.unknownStage")} · {item.job_status ? t(statusLabelKey(item.job_status)) : t("detail.unknownStatus")} · {item.job_kind === "analysis" ? t("detail.jobAnalysis") : t("detail.jobFull")} · {t("detail.attemptCount", { attempt: item.attempt_count, max: item.max_attempts })}</p>
+                  <p>{item.stage ? t(stageLabelKey(item.stage)) : t("detail.unknownStage")} · {item.job_status ? t(statusLabelKey(item.job_status)) : t("detail.unknownStatus")} · {t(jobKindLabelKey(item.job_kind))} · {t("detail.attemptCount", { attempt: item.attempt_count, max: item.max_attempts })}</p>
                   {item.retry_scheduled && item.next_attempt_at ? <p className="retry-note">{t("detail.nextAttempt", { time: formatDateTime(item.next_attempt_at, locale) })}</p> : null}
                   {failureEvents.has(item.event_type) && item.message ? <p className="safe-error-message">{item.message}</p> : null}
                 </div>

@@ -18,6 +18,7 @@ from audio_server.db.models import (
     Analysis,
     AnalysisStatus,
     JobKind,
+    JobStage,
     JobStatus,
     ProcessingJob,
     Recording,
@@ -473,6 +474,48 @@ def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: by
     analysis = app_client.get(f"/api/v1/recordings/{recording_id}/analysis", headers=auth)
     assert analysis.status_code == 200
     assert analysis.json()["status"] == "skipped"
+
+
+def test_a_first_analysis_that_gave_up_is_reported_as_failed_not_pending(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    files, headers, metadata = make_upload(wav_bytes)
+    app_client.post("/api/v1/recordings", files=files, headers=headers)
+    recording_id = uuid.UUID(metadata["id"])
+    session_factory = app_client.app.state.test_session_factory
+    with session_factory.begin() as session:
+        recording = session.get(Recording, recording_id)
+        job = session.scalar(
+            select(ProcessingJob).where(ProcessingJob.recording_id == recording_id)
+        )
+        assert recording is not None and job is not None
+        recording.processing_status = RecordingStatus.COMPLETED
+        job.status = JobStatus.COMPLETED
+        # The analysis that read the committed transcript exhausted its
+        # attempts, so the recording has never held an analysis row.
+        session.add(
+            ProcessingJob(
+                recording_id=recording_id,
+                kind=JobKind.ANALYSIS,
+                status=JobStatus.FAILED,
+                stage=JobStage.ANALYZING,
+                attempt_count=3,
+                max_attempts=3,
+                available_at=datetime.now(UTC),
+                finished_at=datetime.now(UTC),
+                error_code="lmstudio_unavailable",
+                error_message="LM Studio is temporarily unavailable.",
+            )
+        )
+
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+    analysis = app_client.get(f"/api/v1/recordings/{recording_id}/analysis", headers=auth)
+
+    # Calling this "not ready yet" would describe a failure that is never
+    # coming back on its own as work still in progress.
+    assert analysis.status_code == 409
+    assert analysis.json()["error"]["code"] == "analysis_failed"
+    assert analysis.json()["error"]["message"] == "LM Studio is temporarily unavailable."
 
 
 def test_original_audio_stream_supports_authenticated_byte_ranges(

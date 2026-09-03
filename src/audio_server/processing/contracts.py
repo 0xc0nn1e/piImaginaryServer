@@ -177,11 +177,16 @@ class AnalysisResult:
 
 @dataclass(frozen=True, slots=True)
 class PipelineResult:
+    """What a transcription job commits.
+
+    Analysis and translation are not here: they read the committed transcript
+    in their own jobs, so neither can be produced and then discarded by a
+    transcription run that failed after them.
+    """
+
     recording_id: str
     audio: AudioProbe
     transcript: tuple[MergedTranscriptSegment, ...]
-    analysis: AnalysisResult
-    translation: TranslationResult | None = None
     transcription_language: str | None = None
     transcription_language_probability: float | None = None
 

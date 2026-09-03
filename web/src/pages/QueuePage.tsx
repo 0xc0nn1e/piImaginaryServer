@@ -80,11 +80,11 @@ export function QueuePage() {
       ) : null}
       {loading && !data ? <p>{t("queue.loading")}</p> : null}
       {data
-        ? (["full", "analysis"] as const).map((kind) => {
+        ? (["full", "analysis", "translation"] as const).map((kind) => {
             const items = data.items.filter((entry) => entry.job.kind === kind);
             return (
               <div className="queue-section" key={kind}>
-                <h3>{t(kind === "analysis" ? "queue.kind.analysis" : "queue.kind.full")}</h3>
+                <h3>{t(`queue.kind.${kind}`)}</h3>
                 {items.length === 0 ? (
                   <p className="queue-help">{t("queue.empty")}</p>
                 ) : (

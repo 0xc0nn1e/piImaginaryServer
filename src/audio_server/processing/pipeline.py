@@ -1,4 +1,10 @@
-"""DB-free orchestration for one claimed processing job."""
+"""DB-free orchestration for one claimed transcription job.
+
+The pipeline stops at the committed transcript. Analysis and translation read
+that transcript in jobs of their own, so an LM Studio failure costs a retry on
+its own budget instead of a result the transcription job would have thrown
+away on its way to reporting success.
+"""
 
 from __future__ import annotations
 
@@ -6,25 +12,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
-from audio_server.processing.analysis import (
-    DisabledAnalysisProvider,
-    DisabledTranslationProvider,
-)
 from audio_server.processing.contracts import (
-    AnalysisProvider,
-    AnalysisResult,
-    AnalysisStatus,
     AudioPreprocessor,
     AudioProbe,
     DiarizationProvider,
-    MergedTranscriptSegment,
     PipelineResult,
     ProcessingStage,
     RecordingIdentifier,
     StageCallback,
     TranscriptionProvider,
-    TranslationProvider,
-    TranslationResult,
 )
 from audio_server.processing.errors import (
     PermanentProcessingError,
@@ -49,26 +45,17 @@ class ProcessingPipeline:
         audio_processor: AudioPreprocessor,
         transcription_provider: TranscriptionProvider,
         diarization_provider: DiarizationProvider,
-        analysis_provider: AnalysisProvider | None = None,
-        translation_provider: TranslationProvider | None = None,
         merger: TimestampTranscriptMerger | None = None,
     ) -> None:
         self._audio_processor = audio_processor
         self._transcription_provider = transcription_provider
         self._diarization_provider = diarization_provider
-        self._analysis_provider = analysis_provider or DisabledAnalysisProvider()
-        self._translation_provider = translation_provider or DisabledTranslationProvider()
         self._merger = merger or TimestampTranscriptMerger()
 
     def load_providers(self) -> None:
         """Warm optional heavy providers before the worker claims a job."""
 
-        for provider in (
-            self._transcription_provider,
-            self._diarization_provider,
-            self._translation_provider,
-            self._analysis_provider,
-        ):
+        for provider in (self._transcription_provider, self._diarization_provider):
             load = getattr(provider, "load", None)
             if callable(load):
                 load()
@@ -118,68 +105,14 @@ class ProcessingPipeline:
             retryable_unknown=False,
         )
 
-        _notify(stage_callback, ProcessingStage.TRANSLATING)
-        translation = self._translate_without_breaking_transcript(str(recording_id), transcript)
-
-        _notify(stage_callback, ProcessingStage.ANALYZING)
-        analysis = self._analyze_without_breaking_transcript(str(recording_id), transcript)
-
         _notify(stage_callback, ProcessingStage.COMPLETED)
         return PipelineResult(
             recording_id=str(recording_id),
             audio=audio_probe,
             transcript=transcript,
-            analysis=analysis,
-            translation=translation,
             transcription_language=transcription.language,
             transcription_language_probability=transcription.language_probability,
         )
-
-    def _translate_without_breaking_transcript(
-        self,
-        recording_id: str,
-        transcript: tuple[MergedTranscriptSegment, ...],
-    ) -> TranslationResult:
-        """Translation is optional, so a failure must never cost the transcript."""
-
-        try:
-            return self._translation_provider.translate(recording_id, transcript)
-        except ProcessingError as exc:
-            return TranslationResult(
-                status=AnalysisStatus.FAILED,
-                provider=self._translation_provider.name,
-                error_code=exc.code,
-                error_message=exc.safe_message,
-            )
-        except Exception:
-            return TranslationResult(
-                status=AnalysisStatus.FAILED,
-                provider=self._translation_provider.name,
-                error_code="translation_failed",
-                error_message="Transcript translation failed.",
-            )
-
-    def _analyze_without_breaking_transcript(
-        self,
-        recording_id: str,
-        transcript: tuple[MergedTranscriptSegment, ...],
-    ) -> AnalysisResult:
-        try:
-            return self._analysis_provider.analyze(recording_id, transcript)
-        except ProcessingError as exc:
-            return AnalysisResult(
-                status=AnalysisStatus.FAILED,
-                provider=self._analysis_provider.name,
-                error_code=exc.code,
-                error_message=exc.safe_message,
-            )
-        except Exception:
-            return AnalysisResult(
-                status=AnalysisStatus.FAILED,
-                provider=self._analysis_provider.name,
-                error_code="analysis_failed",
-                error_message="Transcript analysis failed.",
-            )
 
 
 def _notify(
@@ -208,7 +141,6 @@ def _execute_stage(
             ProcessingStage.TRANSCRIBING: "transcription_failed",
             ProcessingStage.DIARIZING: "diarization_failed",
             ProcessingStage.MERGING: "merge_failed",
-            ProcessingStage.ANALYZING: "analysis_failed",
             ProcessingStage.COMPLETED: "processing_completion_failed",
         }[stage]
         if retryable_unknown:

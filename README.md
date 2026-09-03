@@ -34,12 +34,16 @@ Raspberry Pi / iPhone / future client
                                              │
                                   timestamp/speaker merge
                                              │
-                                  optional LM Studio analysis
-                                  (transcript only; never audio)
-                                             │
                                              ▼
                                       PostgreSQL
                                   segments + job state
+                                             │
+                                             │ queued follow-up jobs
+                                             ▼
+                                   Analysis worker process
+                              optional LM Studio analysis, then
+                                 Cantonese sentence translation
+                                  (transcript only; never audio)
 ```
 
 Upload and processing have deliberately different lifecycles:
@@ -50,8 +54,11 @@ Upload and processing have deliberately different lifecycles:
 3. It durably stores the unchanged original, inserts a `Recording` and a
    `ProcessingJob`, then returns the recording ID.
 4. A worker claims the PostgreSQL-backed job and runs preprocessing,
-   transcription, diarization, merging, and optional analysis.
-5. Clients poll status and retrieve the segment-level transcript.
+   transcription, diarization, and merging.
+5. Committing the transcript queues the optional LLM work as jobs of its own,
+   so an LM Studio failure is retried on its own budget instead of being lost
+   beside a transcript the job already reported as finished.
+6. Clients poll status and retrieve the segment-level transcript.
 
 PostgreSQL is both the application database and the MVP job queue. This avoids
 a database/Redis dual-write and is sufficient for a small number of expensive,
@@ -665,10 +672,27 @@ Upload concurrency is independent of this setting.
 
 ### Separating analysis from transcription
 
-One queue holds both job kinds, and a claim takes the oldest available job
+One queue holds every job kind, and a claim takes the oldest available job
 regardless of kind. A `full` job occupies its worker for the whole
 transcription, so an `analysis` job -- a single network call to LM Studio --
 can otherwise wait hours behind CPU-bound work it does not depend on.
+
+A `full` job therefore stops at the committed transcript and queues its LLM
+work in the same transaction: `full` hands off to `analysis`, and `analysis` to
+`translation`. `follow_up_kind` on the job row records that hand-off, so a job
+queued by hand from the UI carries none and one button never starts the other's
+work. Each step owns its own retry budget and its own row in the queue, so a
+transient LM Studio failure costs a retry rather than a result -- when analysis
+ran inside the transcription job, its failure was swallowed to protect the
+transcript and the recording was silently left with none. A recording still
+holds one active job at a time, so the successor is inserted only after the job
+that queued it reaches a terminal status. Analysis leads because it is what a
+reviewer waits for; a terminal analysis failure still queues the translation,
+since the two are independent readings of the same transcript.
+
+Re-transcription flags the previous analysis as stale rather than clearing it,
+and a skipped or empty run never replaces a stored reading, so the last good
+analysis stands until a replacement succeeds.
 
 A `translation` job renders each sentence of the committed transcript in
 Cantonese. Sentences are grouped by the server, never by the model: Whisper
@@ -698,9 +722,10 @@ keeps the LLM work responsive while transcription saturates the CPU. Both servic
 be left running older code.
 
 Leaving the value empty keeps the original behaviour of one worker claiming
-every kind. Run at least one worker that claims `analysis`, or analyses stay
-queued forever; a Compose deployment that starts only the `worker` service has
-no analysis worker. The same applies to `daily_summary`.
+every kind. Run at least one worker that claims `analysis` and `translation`,
+or every upload's LLM work stays queued forever; a Compose deployment that
+starts only the `worker` service has no analysis worker. The same applies to
+`daily_summary`.
 
 ## Day summaries
 
