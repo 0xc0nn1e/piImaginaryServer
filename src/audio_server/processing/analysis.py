@@ -426,8 +426,36 @@ def _candidates(response: object) -> tuple[Mapping[str, object], ...]:
         elif isinstance(value, BaseModel):
             found.append(value.model_dump())
         elif isinstance(value, str):
-            found.extend(_json_objects_in(value))
+            found.extend(_json_objects_in(_after_reasoning(value)))
     return tuple(found)
+
+
+# What a model writes to mark where it stops thinking aloud and answers.
+_REASONING_MARKS = (
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reasoning>", "</reasoning>"),
+)
+
+
+def _after_reasoning(text: str) -> str:
+    """Return what the model wrote after it finished thinking aloud.
+
+    A reasoning block holds attempts the model went on to revise, so an object
+    left inside one is not the reply even when it satisfies the schema. Where
+    the model marks the end of its thinking, nothing before that mark is read.
+    A block that never closes means the reply ran out before an answer was
+    reached, which is reported rather than answered from an unfinished draft.
+    """
+
+    answer = text
+    for opener, closer in _REASONING_MARKS:
+        closed = answer.rfind(closer)
+        if closed != -1:
+            answer = answer[closed + len(closer) :]
+        elif opener in answer:
+            return ""
+    return answer
 
 
 def _json_objects_in(text: str) -> list[Mapping[str, object]]:

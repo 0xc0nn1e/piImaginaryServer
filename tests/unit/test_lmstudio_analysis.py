@@ -302,6 +302,52 @@ def test_lmstudio_reads_every_shape_a_structured_response_has_come_back_as(
     assert result.data is not None
 
 
+def test_a_draft_left_inside_the_thinking_is_never_read_as_the_answer() -> None:
+    rejected = _draft()
+    rejected["description"] = {"ja": "書き直す前の草稿です。", "zh_hk": "改之前嘅草稿。"}
+    answer = _draft()
+
+    class ThinkingModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            reply = (
+                f"<think>\nまずこう書きました: {json.dumps(rejected)}\n"
+                f"やはり書き直します。\n</think>\n{json.dumps(answer)}"
+            )
+            return _unstructured(reply)
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([ThinkingModel(_draft())])),
+    )
+
+    result = provider.analyze("recording-id", [_segment()])
+
+    # The draft satisfies the schema too, so only the boundary between thinking
+    # and answering tells them apart. Storing the attempt the model went on to
+    # revise would be wrong in a way nobody reading the page could notice.
+    assert result.data is not None
+    assert result.data["description"]["ja"] == answer["description"]["ja"]
+
+
+def test_thinking_that_never_finished_is_not_answered_from() -> None:
+    class UnfinishedModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            return _unstructured(f"<think>こう書けそうです: {json.dumps(_draft())}")
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([UnfinishedModel(_draft())])),
+    )
+
+    # The reply ran out mid-thought, so there is no answer to take.
+    with pytest.raises(PermanentProcessingError) as caught:
+        provider.analyze("recording-id", [_segment()])
+
+    assert caught.value.code == "lmstudio_schema_invalid"
+
+
 def test_an_unreadable_response_names_its_shape_in_the_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
