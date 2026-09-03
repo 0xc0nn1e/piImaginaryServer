@@ -355,6 +355,38 @@ def test_an_answer_that_quotes_a_thinking_mark_survives_intact() -> None:
     assert result.data["description"]["ja"] == answer["description"]["ja"]
 
 
+def test_a_discarded_draft_is_refused_rather_than_used_when_the_answer_is_broken() -> None:
+    discarded = _draft()
+    discarded["description"] = {"ja": "捨てた草稿です。", "zh_hk": "掉咗嘅草稿。"}
+
+    class QuotingThinker(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            # The thinking quotes the close mark before going on to write, and
+            # discard, a draft that satisfies the schema. The answer it finally
+            # writes is cut off.
+            reply = (
+                "<think>\n話者は「</think>」という表記に触れています。\n"
+                f"まずこう書きました: {json.dumps(discarded, ensure_ascii=False)}\n"
+                "やはり書き直します。\n</think>\n"
+                '{"description": {"ja": "打ち合'
+            )
+            return _unstructured(reply)
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([QuotingThinker(_draft())])),
+    )
+
+    # Ending the block at the first mark would leave the discarded draft
+    # sitting in what looks like the answer, and it validates. Refusing is the
+    # only outcome anyone reading the page could notice.
+    with pytest.raises(PermanentProcessingError) as caught:
+        provider.analyze("recording-id", [_segment()])
+
+    assert caught.value.code == "lmstudio_schema_invalid"
+
+
 def test_thinking_that_never_finished_is_not_answered_from() -> None:
     class UnfinishedModel(FakeModel):
         def respond(self, prompt: str, **kwargs: object) -> object:

@@ -446,17 +446,27 @@ def _after_reasoning(text: str) -> str:
 
     Only a reply that opens with such a block is trimmed. The marks are
     ordinary characters that a transcript can quote and an answer can therefore
-    contain, so searching the whole reply for them would cut a sound reply in
-    half over its own content. A block that opens and never closes means the
-    reply ran out before an answer was reached, which is reported rather than
-    answered from an unfinished draft.
+    contain, so searching every reply for them would cut a sound reply in half
+    over its own content.
+
+    Within a reply that does open with one, the block ends at its last close
+    mark, not its first: thinking that quotes the mark would otherwise end the
+    block early and leave the rest of the thinking looking like the answer.
+    The cost is a reply that both opens with a block and quotes the mark in its
+    answer, which is cut and then reported as unreadable. That is the right way
+    round -- a reported failure can be retried and seen, while a discarded
+    draft stored as the analysis looks exactly like a real one.
+
+    A block that opens and never closes means the reply ran out before an
+    answer was reached, which is reported rather than answered from an
+    unfinished draft.
     """
 
     answer = text.lstrip()
     for opener, closer in _REASONING_MARKS:
         if not answer.startswith(opener):
             continue
-        closed = answer.find(closer, len(opener))
+        closed = answer.rfind(closer)
         if closed == -1:
             return ""
         return answer[closed + len(closer) :]
