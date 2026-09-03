@@ -330,6 +330,31 @@ def test_a_draft_left_inside_the_thinking_is_never_read_as_the_answer() -> None:
     assert result.data["description"]["ja"] == answer["description"]["ja"]
 
 
+def test_an_answer_that_quotes_a_thinking_mark_survives_intact() -> None:
+    answer = _draft()
+    answer["description"] = {
+        "ja": "「</think>」という表記について話しました。",
+        "zh_hk": "傾咗「</think>」呢個寫法。",
+    }
+
+    class QuotingModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.calls.append((prompt, kwargs))
+            return _unstructured(json.dumps(answer, ensure_ascii=False))
+
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([QuotingModel(_draft())])),
+    )
+
+    result = provider.analyze("recording-id", [_segment()])
+
+    # The marks are ordinary characters a transcript can quote. Hunting for
+    # them anywhere in the reply would cut this sound answer in half.
+    assert result.data is not None
+    assert result.data["description"]["ja"] == answer["description"]["ja"]
+
+
 def test_thinking_that_never_finished_is_not_answered_from() -> None:
     class UnfinishedModel(FakeModel):
         def respond(self, prompt: str, **kwargs: object) -> object:

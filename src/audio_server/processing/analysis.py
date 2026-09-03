@@ -442,20 +442,25 @@ def _after_reasoning(text: str) -> str:
     """Return what the model wrote after it finished thinking aloud.
 
     A reasoning block holds attempts the model went on to revise, so an object
-    left inside one is not the reply even when it satisfies the schema. Where
-    the model marks the end of its thinking, nothing before that mark is read.
-    A block that never closes means the reply ran out before an answer was
-    reached, which is reported rather than answered from an unfinished draft.
+    left inside one is not the reply even when it satisfies the schema.
+
+    Only a reply that opens with such a block is trimmed. The marks are
+    ordinary characters that a transcript can quote and an answer can therefore
+    contain, so searching the whole reply for them would cut a sound reply in
+    half over its own content. A block that opens and never closes means the
+    reply ran out before an answer was reached, which is reported rather than
+    answered from an unfinished draft.
     """
 
-    answer = text
+    answer = text.lstrip()
     for opener, closer in _REASONING_MARKS:
-        closed = answer.rfind(closer)
-        if closed != -1:
-            answer = answer[closed + len(closer) :]
-        elif opener in answer:
+        if not answer.startswith(opener):
+            continue
+        closed = answer.find(closer, len(opener))
+        if closed == -1:
             return ""
-    return answer
+        return answer[closed + len(closer) :]
+    return text
 
 
 def _json_objects_in(text: str) -> list[Mapping[str, object]]:
