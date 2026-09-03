@@ -116,7 +116,7 @@ class LMStudioTranslationProvider:
                 response_format=_GenerationTranslation,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            return _DraftTranslation.model_validate(structured_payload(response)).zh_hk.strip()
+            return structured_payload(response, _DraftTranslation).zh_hk.strip()
         except ValidationError as exc:
             # Field paths and rule names only; the rejected value is model
             # output and must never reach the log.

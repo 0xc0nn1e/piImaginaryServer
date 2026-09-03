@@ -83,6 +83,12 @@ def _segment(text: str = "一旦こちらで持ち帰ります。") -> MergedTra
     )
 
 
+def _unstructured(reply: str) -> object:
+    """The shape the SDK reports when it could not parse the reply as JSON."""
+
+    return SimpleNamespace(parsed=reply, content=reply, structured=False)
+
+
 def _draft(quote: str = "一旦こちらで持ち帰ります。") -> dict[str, object]:
     return {
         "description": {"ja": "打ち合わせです。", "zh_hk": "呢段係會議內容。"},
@@ -258,6 +264,21 @@ def test_lmstudio_rejects_missing_invalid_or_unstructured_output(response: objec
         # flag is not the payload, and refusing over it is what took analysis
         # down; the strict draft schema still decides what may be stored.
         lambda draft: SimpleNamespace(parsed=draft, structured=False),
+        # A reasoning model narrates first, so the reply as a whole is not JSON
+        # and the SDK hands back the raw text with parsed set to the same str.
+        lambda draft: _unstructured(
+            f"<think>\nどう答えるか考えます。{{仮}}\n</think>\n{json.dumps(draft)}"
+        ),
+        # A fenced reply, for the same reason.
+        lambda draft: _unstructured(f"```json\n{json.dumps(draft)}\n```"),
+        # An answer followed by a closing remark.
+        lambda draft: _unstructured(f"{json.dumps(draft)}\n\n以上です。"),
+        # A remark that is itself an object, after the answer. Taking whichever
+        # object comes last would read that one as the reply; the schema is
+        # what settles it.
+        lambda draft: _unstructured(
+            f"{json.dumps(draft)}\n\n{json.dumps({'note': 'done'})}"
+        ),
     ],
 )
 def test_lmstudio_reads_every_shape_a_structured_response_has_come_back_as(

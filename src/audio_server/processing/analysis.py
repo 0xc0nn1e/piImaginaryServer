@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -313,7 +313,7 @@ class LMStudioAnalysisProvider:
                 response_format=_GenerationAnalysisDraft,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            return _AnalysisDraft.model_validate(structured_payload(response))
+            return structured_payload(response, _AnalysisDraft)
         except ValidationError as exc:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.
@@ -366,29 +366,42 @@ def _safe_path(location: Sequence[object]) -> str:
     return ".".join(parts) or "<root>"
 
 
-def structured_payload(response: object) -> Mapping[str, object]:
-    """Return the structured object an LM Studio response carries.
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
-    The SDK is depended on by range, and what ``parsed`` holds has not been
-    stable across its releases: a plain mapping in some, the parsed instance of
-    the response format in others, the raw JSON text in others again. Reading
-    only one of those shapes turns a routine SDK upgrade into every analysis
-    and translation failing at once, so each is accepted here.
 
-    The SDK's own ``structured`` flag is read as a symptom, not as a gate. A
-    reply that carries a complete result while the flag disagrees is still a
-    result, and ``_AnalysisDraft`` -- not the flag -- is what decides whether
-    it may be stored. Refusing before looking also meant the shape that was
-    actually returned never reached the log, which is what left this failing
-    for days with nothing to read.
+def structured_payload(response: object, schema: type[ModelT]) -> ModelT:
+    """Return the reply an LM Studio response carries, read as ``schema``.
+
+    Two things about a reply are unstable. What the SDK puts in ``parsed`` has
+    changed across releases -- a mapping, the parsed response format, or the
+    raw text -- and the text itself is only JSON when the model answers with
+    nothing else: a reasoning model narrates first, and some models fence their
+    reply, in which case the SDK's own ``json.loads`` fails and it hands back
+    the text as though no schema had been asked for. Reading one shape only is
+    what stopped every analysis and translation at once.
+
+    So each shape is offered to ``schema``, and the schema decides. Candidates
+    run best-first -- what the SDK parsed, then objects embedded in the text
+    from the end backwards, since the answer follows the narration -- but
+    position only orders the attempts and never settles which one is the
+    answer. Nothing the schema rejects is accepted, so a trailing remark that
+    happens to be an object cannot displace the reply it follows.
     """
 
+    candidates = _candidates(response)
+    first_error: ValidationError | None = None
+    for candidate in candidates:
+        try:
+            return schema.model_validate(candidate)
+        except ValidationError as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        # Every candidate was readable and none fitted. The caller reports the
+        # violations, which name the fields rather than the model's words.
+        raise first_error
     parsed = getattr(response, "parsed", None)
     content = getattr(response, "content", None)
-    for candidate in (parsed, content):
-        payload = _as_mapping(candidate)
-        if payload is not None:
-            return payload
     # The values are model output and must never be logged; their types, and
     # the flag the SDK set, are not.
     logger.warning(
@@ -403,19 +416,37 @@ def structured_payload(response: object) -> Mapping[str, object]:
     raise ValueError("LM Studio structured response is missing parsed data")
 
 
-def _as_mapping(value: object) -> Mapping[str, object] | None:
-    if isinstance(value, Mapping):
-        return value
-    if isinstance(value, BaseModel):
-        return value.model_dump()
-    if isinstance(value, str):
+def _candidates(response: object) -> tuple[Mapping[str, object], ...]:
+    """Every object a reply might be, most likely first."""
+
+    found: list[Mapping[str, object]] = []
+    for value in (getattr(response, "parsed", None), getattr(response, "content", None)):
+        if isinstance(value, Mapping):
+            found.append(cast(Mapping[str, object], value))
+        elif isinstance(value, BaseModel):
+            found.append(value.model_dump())
+        elif isinstance(value, str):
+            found.extend(_json_objects_in(value))
+    return tuple(found)
+
+
+def _json_objects_in(text: str) -> list[Mapping[str, object]]:
+    """Return the complete JSON objects embedded in a reply, last one first."""
+
+    decoder = json.JSONDecoder()
+    found: list[Mapping[str, object]] = []
+    index = text.find("{")
+    while index != -1:
         try:
-            loaded = json.loads(value)
+            value, end = decoder.raw_decode(text, index)
         except ValueError:
-            return None
-        if isinstance(loaded, Mapping):
-            return loaded
-    return None
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(value, Mapping):
+            found.append(cast(Mapping[str, object], value))
+        index = text.find("{", max(end, index + 1))
+    found.reverse()
+    return found
 
 
 def classify_lmstudio_failure(

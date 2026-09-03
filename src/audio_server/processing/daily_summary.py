@@ -179,7 +179,7 @@ class LMStudioDailySummaryProvider:
                 response_format=_GenerationDailyDraft,
                 config={"temperature": 0.2, "maxTokens": self._settings.max_tokens},
             )
-            return _DailyDraft.model_validate(structured_payload(response))
+            return structured_payload(response, _DailyDraft)
         except ValidationError as exc:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.

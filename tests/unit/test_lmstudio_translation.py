@@ -151,6 +151,22 @@ def test_an_oversized_reply_is_rejected_after_generation() -> None:
     assert caught.value.code == "lmstudio_translation_schema_invalid"
 
 
+def test_a_reasoning_model_reply_still_yields_its_translation() -> None:
+    class ThinkingModel(FakeModel):
+        def respond(self, prompt: str, **kwargs: object) -> object:
+            self.prompts.append(prompt)
+            del kwargs
+            reply = '<think>訳し方を考えます。</think>\n{"zh_hk": "去咗。"}'
+            # The whole reply is not JSON, so the SDK reports it unparsed.
+            return SimpleNamespace(parsed=reply, content=reply, structured=False)
+
+    result = _provider(FakeClient([ThinkingModel([])])).translate(
+        "recording-1", [_segment(0, "行きました。")]
+    )
+
+    assert [item.text_zh_hk for item in result.translations] == ["去咗。"]
+
+
 def test_an_unreadable_response_is_named_the_same_way_analysis_names_it() -> None:
     class UnreadableModel(FakeModel):
         def respond(self, prompt: str, **kwargs: object) -> object:
