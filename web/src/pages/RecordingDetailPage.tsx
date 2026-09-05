@@ -10,6 +10,7 @@ import {
   getAnalysis,
   getReanalysis,
   getRecording,
+  getRecordingNeighbours,
   setRecordingChecked,
   getRecordingAudioUrl,
   getRecordingStatus,
@@ -43,6 +44,7 @@ import type {
   Bookmark,
   FuriganaMap,
   BookmarkKind,
+  RecordingNeighboursResponse,
   RecordingStatusResponse,
   RecordingSummary,
   TranscriptResponse,
@@ -109,6 +111,7 @@ export function RecordingDetailPage() {
     (status?.job?.kind === "analysis" || status?.job?.kind === "translation") &&
     (status.job.status === "queued" || status.job.status === "processing");
 
+  const [neighbours, setNeighbours] = useState<RecordingNeighboursResponse | null>(null);
   const [analysisDraft, setAnalysisDraft] = useState<AnalysisResultV2 | null>(null);
   const analysisKind = useRef<AnalysisState["kind"]>("idle");
   const analysisRequest = useRef(0);
@@ -336,6 +339,23 @@ export function RecordingDetailPage() {
   useEffect(() => {
     editing.current = transcriptDraft !== null || translationDraft !== null;
   }, [transcriptDraft, translationDraft]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setNeighbours(null);
+    void getRecordingNeighbours(id)
+      .then((data) => {
+        if (!cancelled) setNeighbours(data);
+      })
+      // Stepping between recordings is a convenience. Failing to work out
+      // which ones sit either side must not take the page down with it.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const hasOpenDraft = transcriptDraft !== null || translationDraft !== null;
 
   const translationJobActive =
     status?.job?.kind === "translation" &&
@@ -783,6 +803,23 @@ export function RecordingDetailPage() {
               </> : <><div className="segment-meta"><time>{formatTimestamp(segment.start_time)}</time><strong>{segment.speaker_label}</strong>{segment.language ? <span>{segment.language.toUpperCase()}</span> : null}{segment.has_overlap ? <span className="overlap-label">{t("detail.overlap")}</span> : null}</div><div className="segment-body"><p><Furigana text={segment.text} readings={transcriptReadings} /></p>{renderTranslation(translationsByLastSegment.get(segment.id), t)}</div></>}
             </li>)}
           </ol> : null}
+          <nav aria-label={t("detail.stepping")} className="record-stepper">
+            {/* An open editor holds words nobody has saved, and these controls
+                sit directly under it. Leaving the recording would take them
+                with it, so stepping waits until the edit is saved or dropped. */}
+            <button
+              className="button button-secondary"
+              disabled={!neighbours?.previous_id || hasOpenDraft}
+              type="button"
+              onClick={() => neighbours?.previous_id && navigate(`/recordings/${neighbours.previous_id}`)}
+            >{t("detail.previousRecording")}</button>
+            <button
+              className="button button-secondary"
+              disabled={!neighbours?.next_id || hasOpenDraft}
+              type="button"
+              onClick={() => neighbours?.next_id && navigate(`/recordings/${neighbours.next_id}`)}
+            >{t("detail.nextRecording")}</button>
+          </nav>
         </section>
       ) : null}
 

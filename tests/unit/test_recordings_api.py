@@ -476,6 +476,60 @@ def test_transcript_and_analysis_retrieval(app_client: TestClient, wav_bytes: by
     assert analysis.json()["status"] == "skipped"
 
 
+def _upload_at(app_client: TestClient, audio: bytes, started_at: datetime) -> uuid.UUID:
+    # A device deduplicates by checksum, so each recording needs its own audio.
+    distinct = audio + started_at.isoformat().encode()
+    files, headers, metadata = make_upload(
+        distinct,
+        metadata_overrides={
+            "recording_start_time": started_at.isoformat(),
+            "recording_end_time": (started_at + timedelta(seconds=1)).isoformat(),
+        },
+    )
+    response = app_client.post("/api/v1/recordings", files=files, headers=headers)
+    assert response.status_code == 201
+    return uuid.UUID(metadata["id"])
+
+
+def test_recordings_are_listed_and_stepped_through_by_capture_time(
+    app_client: TestClient, wav_bytes: bytes
+) -> None:
+    auth = {"Authorization": f"Bearer {TEST_API_TOKEN}"}
+    base = datetime(2026, 8, 10, 9, 0, tzinfo=UTC)
+    # Uploaded newest first, so upload order and capture order disagree.
+    latest = _upload_at(app_client, wav_bytes, base + timedelta(hours=2))
+    earliest = _upload_at(app_client, wav_bytes, base)
+    middle = _upload_at(app_client, wav_bytes, base + timedelta(hours=1))
+
+    listed = app_client.get("/api/v1/recordings", headers=auth)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [
+        str(latest),
+        str(middle),
+        str(earliest),
+    ]
+
+    neighbours = app_client.get(f"/api/v1/recordings/{middle}/neighbours", headers=auth)
+    assert neighbours.status_code == 200
+    # Stepping from a recording page and reading down the list have to agree.
+    assert neighbours.json()["previous_id"] == str(earliest)
+    assert neighbours.json()["next_id"] == str(latest)
+
+    ends = app_client.get(f"/api/v1/recordings/{earliest}/neighbours", headers=auth)
+    assert ends.json()["previous_id"] is None
+    assert ends.json()["next_id"] == str(middle)
+
+
+def test_neighbours_of_an_unknown_recording_are_not_found(app_client: TestClient) -> None:
+    response = app_client.get(
+        f"/api/v1/recordings/{uuid.uuid4()}/neighbours",
+        headers={"Authorization": f"Bearer {TEST_API_TOKEN}"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "recording_not_found"
+
+
 def test_a_first_analysis_that_gave_up_is_reported_as_failed_not_pending(
     app_client: TestClient, wav_bytes: bytes
 ) -> None:

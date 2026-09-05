@@ -9,6 +9,7 @@ export type JobStage =
   | "transcribing"
   | "diarizing"
   | "merging"
+  | "translating"
   | "analyzing"
   | "completed";
 
@@ -145,6 +146,13 @@ export interface RecordingStatusResponse {
   recording_id: string;
   status: RecordingStatus;
   job: JobStatusDetails | null;
+}
+
+export interface RecordingNeighboursResponse {
+  recording_id: string;
+  // By capture time: previous is the recording made before this one.
+  previous_id: string | null;
+  next_id: string | null;
 }
 
 export interface ProcessingRequestResponse {

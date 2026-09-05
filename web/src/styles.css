@@ -195,6 +195,18 @@ textarea {
   flex-wrap: wrap;
 }
 
+/* Stepping between recordings sits under the transcript, one control at each
+   edge so the direction of travel is obvious on a narrow screen too. */
+.record-stepper {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
 .segment-edit-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;

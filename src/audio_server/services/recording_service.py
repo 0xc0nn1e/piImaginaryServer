@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePath, PurePosixPath
 from typing import BinaryIO
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -276,10 +276,59 @@ class RecordingService:
             statement = statement.where(Recording.processing_status == status)
         if checked is not None:
             statement = statement.where(Recording.checked == checked)
-        statement = statement.order_by(Recording.created_at.desc(), Recording.id.desc())
+        # Recordings are read by when they were captured, not by when they
+        # happened to reach the server: a device that uploads a backlog would
+        # otherwise scatter one afternoon's audio through the list.
+        statement = statement.order_by(Recording.started_at.desc(), Recording.id.desc())
         statement = statement.limit(limit).offset(offset)
         with self._session_factory() as session:
             return list(session.scalars(statement))
+
+    def get_neighbours(
+        self, recording_id: uuid.UUID
+    ) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+        """Return the recordings captured either side of this one.
+
+        Ordered by capture time and broken by id, the same way the list is, so
+        stepping through recordings from a recording page and reading down the
+        list visit them in one order rather than two.
+        """
+
+        with self._session_factory() as session:
+            recording = session.get(Recording, recording_id)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            earlier = session.scalar(
+                select(Recording.id)
+                .where(
+                    or_(
+                        Recording.started_at < recording.started_at,
+                        and_(
+                            Recording.started_at == recording.started_at,
+                            Recording.id < recording.id,
+                        ),
+                    )
+                )
+                .order_by(Recording.started_at.desc(), Recording.id.desc())
+                .limit(1)
+            )
+            later = session.scalar(
+                select(Recording.id)
+                .where(
+                    or_(
+                        Recording.started_at > recording.started_at,
+                        and_(
+                            Recording.started_at == recording.started_at,
+                            Recording.id > recording.id,
+                        ),
+                    )
+                )
+                .order_by(Recording.started_at, Recording.id)
+                .limit(1)
+            )
+            return earlier, later
 
     def set_checked(self, recording_id: uuid.UUID, *, checked: bool) -> Recording:
         """Mark a recording as reviewed by the administrator, or clear that mark."""

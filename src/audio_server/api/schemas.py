@@ -403,6 +403,14 @@ class AnalysisResponse(BaseModel):
     furigana: FuriganaMap = Field(default_factory=dict)
 
 
+class RecordingNeighboursResponse(BaseModel):
+    """The recordings captured either side of one, by capture time."""
+
+    recording_id: uuid.UUID
+    previous_id: uuid.UUID | None
+    next_id: uuid.UUID | None
+
+
 class RetryResponse(BaseModel):
     recording_id: uuid.UUID
     job_id: uuid.UUID

@@ -13,6 +13,7 @@ import type {
   ProcessingRequestResponse,
   QueueResponse,
   RecordingListResponse,
+  RecordingNeighboursResponse,
   RecordingStatus,
   RecordingStatusResponse,
   RecordingSummary,
@@ -207,6 +208,12 @@ export function getRecordingAudioUrl(recordingId: string): string {
 
 export function getRecordingStatus(recordingId: string): Promise<RecordingStatusResponse> {
   return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/status`);
+}
+
+export function getRecordingNeighbours(
+  recordingId: string,
+): Promise<RecordingNeighboursResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/neighbours`);
 }
 
 export function getActivity(recordingId: string): Promise<ActivityResponse> {

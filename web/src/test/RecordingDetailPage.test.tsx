@@ -430,6 +430,111 @@ describe("recording transcript states", () => {
     ).toBeInTheDocument();
   });
 
+  it("holds stepping while an unsaved transcript edit is open", async () => {
+    const laterId = "0f3d5f6a-1111-4222-8333-444455556666";
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({
+        recording_id: recordingId,
+        status: "completed",
+        revision: 1,
+        text: "",
+        segments: [
+          {
+            id: "segment-1",
+            sequence: 0,
+            speaker_label: "SPEAKER_00",
+            start_time: 0,
+            end_time: 1,
+            text: "行きました。",
+            language: "ja",
+            confidence: null,
+            has_overlap: false,
+          },
+        ],
+        translations: [],
+        translation_revision: 0,
+        furigana: {},
+      }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/neighbours")) {
+        return Promise.resolve(
+          jsonResponse({ recording_id: recordingId, previous_id: null, next_id: laterId }),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await screen.findByText("行きました。");
+    await browser.click(screen.getByRole("button", { name: "編輯" }));
+
+    // The controls sit right under the editor; leaving now would take the
+    // unsaved words with it.
+    expect(screen.getByRole("button", { name: "下一個錄音 →" })).toBeDisabled();
+  });
+
+  it("steps to the recording captured after this one from the transcript", async () => {
+    const laterId = "0f3d5f6a-1111-4222-8333-444455556666";
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({
+        recording_id: recordingId,
+        status: "completed",
+        revision: 1,
+        text: "",
+        segments: [
+          {
+            id: "segment-1",
+            sequence: 0,
+            speaker_label: "SPEAKER_00",
+            start_time: 0,
+            end_time: 1,
+            text: "行きました。",
+            language: "ja",
+            confidence: null,
+            has_overlap: false,
+          },
+        ],
+        translations: [],
+        translation_revision: 0,
+        furigana: {},
+      }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/neighbours")) {
+        return Promise.resolve(
+          jsonResponse({
+            recording_id: recordingId,
+            previous_id: null,
+            next_id: laterId,
+          }),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "逐字稿" }));
+    await screen.findByText("行きました。");
+
+    // Nothing was captured before this one, so only one direction is offered.
+    expect(screen.getByRole("button", { name: "← 上一個錄音" })).toBeDisabled();
+    await browser.click(screen.getByRole("button", { name: "下一個錄音 →" }));
+
+    expect(window.location.pathname).toBe(`/recordings/${laterId}`);
+  });
+
   it("names the Cantonese translation job the transcript hands off to", async () => {
     window.history.replaceState({}, "", `/recordings/${recordingId}`);
     const base = mockDetailApi(

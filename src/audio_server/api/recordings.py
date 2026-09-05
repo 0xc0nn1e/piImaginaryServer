@@ -24,6 +24,7 @@ from audio_server.api.schemas import (
     JobStatusResponse,
     RecordingCheckedRequest,
     RecordingListResponse,
+    RecordingNeighboursResponse,
     RecordingStatusResponse,
     RecordingSummary,
     RetryResponse,
@@ -192,6 +193,21 @@ def get_transcript(
         ],
         translation_revision=recording.translation_revision,
         furigana=_segment_furigana(segment_responses),
+    )
+
+
+@router.get("/{recording_id}/neighbours", response_model=RecordingNeighboursResponse)
+def get_recording_neighbours(
+    recording_id: uuid.UUID,
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> RecordingNeighboursResponse:
+    """Name the recordings before and after this one, for stepping through them."""
+
+    earlier, later = service.get_neighbours(recording_id)
+    return RecordingNeighboursResponse(
+        recording_id=recording_id,
+        previous_id=earlier,
+        next_id=later,
     )
 
 
