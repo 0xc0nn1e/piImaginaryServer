@@ -2,10 +2,19 @@ import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
-import { useI18n } from "../i18n";
+import { type TranslationKey, useI18n } from "../i18n";
 import { LanguageSwitch } from "./LanguageSwitch";
 
 type HealthState = "checking" | "ok" | "fail";
+
+// One list for the sidebar and the mobile header, so the two cannot drift.
+const NAV_ITEMS: { to: string; label: TranslationKey; sub: TranslationKey; bars: number }[] = [
+  { to: "/recordings", label: "nav.recordings", sub: "nav.recordingsSub", bars: 3 },
+  { to: "/days", label: "nav.days", sub: "nav.daysSub", bars: 4 },
+  { to: "/queue", label: "nav.queue", sub: "nav.queueSub", bars: 2 },
+  { to: "/bookmarks", label: "nav.bookmarks", sub: "nav.bookmarksSub", bars: 2 },
+  { to: "/settings", label: "nav.settings", sub: "nav.settingsSub", bars: 3 },
+];
 
 const SHOW_HEALTH = import.meta.env.VITE_SHOW_HEALTH !== "false";
 const HEALTHY_POLL_INTERVAL_MS = 180_000;
@@ -86,60 +95,19 @@ export function AppLayout() {
           </span>
         </Link>
         <nav aria-label={t("nav.main")}>
-          <NavLink to="/recordings">
-            <span className="nav-glyph" aria-hidden="true">
-              <i />
-              <i />
-              <i />
-            </span>
-            <span>
-              {t("nav.recordings")}
-              <small>{t("nav.recordingsSub")}</small>
-            </span>
-          </NavLink>
-          <NavLink to="/days">
-            <span className="nav-glyph" aria-hidden="true">
-              <i />
-              <i />
-              <i />
-              <i />
-            </span>
-            <span>
-              {t("nav.days")}
-              <small>{t("nav.daysSub")}</small>
-            </span>
-          </NavLink>
-          <NavLink to="/queue">
-            <span className="nav-glyph" aria-hidden="true">
-              <i />
-              <i />
-            </span>
-            <span>
-              {t("nav.queue")}
-              <small>{t("nav.queueSub")}</small>
-            </span>
-          </NavLink>
-          <NavLink to="/bookmarks">
-            <span className="nav-glyph" aria-hidden="true">
-              <i />
-              <i />
-            </span>
-            <span>
-              {t("nav.bookmarks")}
-              <small>{t("nav.bookmarksSub")}</small>
-            </span>
-          </NavLink>
-          <NavLink to="/settings">
-            <span className="nav-glyph" aria-hidden="true">
-              <i />
-              <i />
-              <i />
-            </span>
-            <span>
-              {t("nav.settings")}
-              <small>{t("nav.settingsSub")}</small>
-            </span>
-          </NavLink>
+          {NAV_ITEMS.map((item) => (
+            <NavLink key={item.to} to={item.to}>
+              <span className="nav-glyph" aria-hidden="true">
+                {Array.from({ length: item.bars }, (_, index) => (
+                  <i key={index} />
+                ))}
+              </span>
+              <span>
+                {t(item.label)}
+                <small>{t(item.sub)}</small>
+              </span>
+            </NavLink>
+          ))}
         </nav>
         <LanguageSwitch />
         {SHOW_HEALTH ? (
@@ -192,6 +160,15 @@ export function AppLayout() {
               {t("nav.logout")}
             </button>
           </div>
+          {/* The sidebar is hidden at this width, so its destinations move up
+              here; otherwise every page but the list is reachable only by URL. */}
+          <nav aria-label={t("nav.main")} className="mobile-nav">
+            {NAV_ITEMS.map((item) => (
+              <NavLink key={item.to} to={item.to}>
+                {t(item.label)}
+              </NavLink>
+            ))}
+          </nav>
         </header>
         <main className="main-content">
           {logoutError ? (

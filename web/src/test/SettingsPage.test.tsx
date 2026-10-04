@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -84,7 +84,35 @@ describe("settings page", () => {
     expect(analysis).toBeChecked();
     expect(analysis).toBeEnabled();
     expect(screen.getByRole("switch", { name: "廣東話譯文" })).not.toBeChecked();
-    expect(screen.getByRole("link", { name: /設定/ })).toHaveAttribute("aria-current", "page");
+    expect(
+      within(screen.getByRole("complementary")).getByRole("link", { name: /設定/ }),
+    ).toHaveAttribute("aria-current", "page");
+  });
+
+  it("is reachable from the mobile header, where the sidebar is hidden", async () => {
+    vi.stubGlobal("fetch", mockSettingsApi({ auto_analysis: true, auto_translation: true }));
+    window.history.replaceState({}, "", "/settings");
+
+    render(<App />);
+    await screen.findByRole("switch", { name: "分析" });
+
+    const mobileNav = screen
+      .getAllByRole("navigation", { name: "主要導覽" })
+      .find((nav) => nav.closest(".mobile-header") !== null);
+    expect(mobileNav).toBeDefined();
+    const links = within(mobileNav as HTMLElement).getAllByRole("link");
+    // Every sidebar destination, not only this page, or the rest stay URL-only.
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/recordings",
+      "/days",
+      "/queue",
+      "/bookmarks",
+      "/settings",
+    ]);
+    expect(within(mobileNav as HTMLElement).getByRole("link", { name: "設定" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("sends only the switch that changed, with the CSRF token", async () => {

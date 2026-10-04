@@ -2100,6 +2100,7 @@ select {
     z-index: 30;
     top: 0;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     min-height: 66px;
@@ -2107,6 +2108,52 @@ select {
     border-bottom: 1px solid var(--line);
     background: rgb(9 10 15 / 91%);
     backdrop-filter: blur(20px);
+  }
+
+  .mobile-brand,
+  .mobile-actions {
+    min-height: 66px;
+  }
+
+  /* The sidebar's destinations, as a second header row that scrolls sideways
+     edge to edge rather than wrapping. */
+  .mobile-nav {
+    display: flex;
+    flex: 0 0 calc(100% + 48px);
+    gap: 6px;
+    margin: 0 -24px;
+    padding: 0 24px 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .mobile-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-nav a {
+    flex-shrink: 0;
+    padding: 7px 13px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: #858490;
+    background: var(--surface-soft);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: 150ms ease;
+  }
+
+  .mobile-nav a:hover {
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  .mobile-nav a.active {
+    border-color: rgb(189 124 255 / 35%);
+    color: var(--ink);
+    background: var(--violet-soft);
   }
 
   .mobile-brand .brand-mark {
@@ -2282,6 +2329,12 @@ select {
 
   .mobile-header {
     padding: 0 15px;
+  }
+
+  .mobile-nav {
+    flex-basis: calc(100% + 30px);
+    margin: 0 -15px;
+    padding: 0 15px 12px;
   }
 
   .archive-stats > div {
