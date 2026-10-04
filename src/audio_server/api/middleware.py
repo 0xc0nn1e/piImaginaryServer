@@ -121,6 +121,7 @@ class ApiRequestGuardMiddleware:
             or _is_browser_read(scope)
             or _is_browser_recording_mutation(scope)
             or _is_browser_day_mutation(scope)
+            or _is_browser_settings_mutation(scope)
         ):
             await self._handle_limited_request(scope, receive, send, self._mutation_limit)
             return
@@ -271,7 +272,19 @@ def _is_browser_read(scope: Scope) -> bool:
         or path == "/api/v1/queue"
         or path == "/api/v1/days"
         or path.startswith("/api/v1/days/")
+        or path == "/api/v1/settings/processing"
     )
+
+
+def _is_browser_settings_mutation(scope: Scope) -> bool:
+    """Flipping a processing switch; the router demands Origin and CSRF.
+
+    Missing from this list, the change would be answered with the bearer-token
+    401 a browser can never satisfy, which the web UI reads as a dead session.
+    """
+
+    path = str(scope.get("path", "")).rstrip("/")
+    return scope.get("method") == "PATCH" and path == "/api/v1/settings/processing"
 
 
 def _is_browser_day_mutation(scope: Scope) -> bool:

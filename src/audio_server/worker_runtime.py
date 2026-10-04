@@ -276,7 +276,8 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
         )
         recording.transcript_revision += 1
         # The words the last analysis was written from have just been replaced.
-        # The analysis job queued behind this one writes the replacement; until
+        # The analysis job queued behind this one -- or asked for by hand, when
+        # automatic analysis is switched off -- writes the replacement; until
         # it commits, the previous reading is flagged rather than cleared, so a
         # recording is never left with nothing while the model works.
         analysis = session.scalar(
@@ -289,7 +290,8 @@ def _result_persister(claim: ClaimedJob, result: PipelineResult) -> ResultPersis
             session, recording_id, result.transcript, preserved
         )
         # Machine translations belonged to the segments just deleted; the
-        # translation job at the end of the chain writes them again.
+        # translation job at the end of the chain writes them again, or one
+        # asked for by hand when automatic translation is switched off.
         recording.translation_revision += 1
 
     return persist

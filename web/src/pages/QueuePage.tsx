@@ -72,7 +72,9 @@ export function QueuePage() {
         ) : null}
       </div>
       <p className="queue-help">{t("queue.help")}</p>
-      <p className="queue-help">{t("queue.separateWorkers")}</p>
+      <p className="queue-help">
+        {t("queue.separateWorkers")} <Link to="/settings">{t("queue.openSettings")}</Link>
+      </p>
       {error ? (
         <div className="notice notice-error" role="alert">
           {error}

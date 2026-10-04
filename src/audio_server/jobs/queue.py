@@ -22,10 +22,12 @@ from sqlalchemy.orm import Session
 from audio_server.activity.repository import append_activity
 from audio_server.db.activity_models import ProcessingActivityType
 from audio_server.db.models import (
+    PROCESSING_SETTINGS_ID,
     JobKind,
     JobStage,
     JobStatus,
     ProcessingJob,
+    ProcessingSettings,
     Recording,
     RecordingStatus,
 )
@@ -221,6 +223,9 @@ def chained_follow_up(kind: JobKind) -> JobKind | None:
     Only the chain uses this. A job queued by hand from the recording or day
     page carries no follow-up, so pressing one button never sets off the
     other's work.
+
+    This fixes the order only. Whether a step runs at all is the
+    administrator's switch, read when the hand-off happens.
     """
 
     if kind is JobKind.FULL:
@@ -228,6 +233,40 @@ def chained_follow_up(kind: JobKind) -> JobKind | None:
     if kind is JobKind.ANALYSIS:
         return JobKind.TRANSLATION
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticFollowUps:
+    """Which LLM steps the chain queues on its own behind a committed transcript.
+
+    Transcription has no switch: every recording is transcribed. A step that is
+    switched off can still be queued by hand from the recording or day page.
+    """
+
+    analysis: bool = True
+    translation: bool = True
+
+    def runs(self, kind: JobKind) -> bool:
+        if kind is JobKind.ANALYSIS:
+            return self.analysis
+        if kind is JobKind.TRANSLATION:
+            return self.translation
+        # Only the LLM steps are ever chained (processing_job_follow_up_kind).
+        return False
+
+
+def read_automatic_follow_ups(session: Session) -> AutomaticFollowUps:
+    """Read the administrator's switches inside the caller's transaction."""
+
+    settings = session.get(ProcessingSettings, PROCESSING_SETTINGS_ID)
+    if settings is None:
+        # The migration seeds this row. Without it, carry on as before the
+        # switches existed rather than quietly dropping every LLM step.
+        return AutomaticFollowUps()
+    return AutomaticFollowUps(
+        analysis=settings.auto_analysis,
+        translation=settings.auto_translation,
+    )
 
 
 def _queue_follow_up(
@@ -243,11 +282,22 @@ def _queue_follow_up(
     ``uq_processing_jobs_one_active_recording`` allows one queued or running
     job per recording, so the successor can only be inserted once this one no
     longer counts as active.
+
+    The switches are read here, in the transaction that commits the hand-off,
+    rather than when the recording was uploaded, so turning a step off also
+    covers recordings still waiting for their transcript. A step that is off
+    is passed over instead of ending the chain: a transcript whose analysis is
+    switched off still goes on to its translation.
     """
 
-    follow_up_kind = job.follow_up_kind
     recording_id = job.recording_id
-    if follow_up_kind is None or recording_id is None:
+    if job.follow_up_kind is None or recording_id is None:
+        return None
+    automatic = read_automatic_follow_ups(session)
+    follow_up_kind: JobKind | None = job.follow_up_kind
+    while follow_up_kind is not None and not automatic.runs(follow_up_kind):
+        follow_up_kind = chained_follow_up(follow_up_kind)
+    if follow_up_kind is None:
         return None
 
     # A recording's timeline is ordered by time and then by a random id, so an
@@ -321,7 +371,8 @@ def create_processing_job(
     job = ProcessingJob(
         recording_id=recording_id,
         kind=kind,
-        # Transcription always chains; a job asked for by hand never does.
+        # Transcription always hands off to the chain, whose switches decide
+        # what runs; a job asked for by hand never chains.
         follow_up_kind=chained_follow_up(kind) if kind is JobKind.FULL else None,
         status=JobStatus.QUEUED,
         stage=JobStage.QUEUED,

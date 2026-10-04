@@ -10,6 +10,7 @@ import { QueuePage } from "./pages/QueuePage";
 import { LoginPage } from "./pages/LoginPage";
 import { RecordingDetailPage } from "./pages/RecordingDetailPage";
 import { RecordingsPage } from "./pages/RecordingsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
 
 export function App() {
@@ -48,6 +49,7 @@ export function App() {
               <Route path="/days/:day" element={<DayPage />} />
               <Route path="/queue" element={<QueuePage />} />
               <Route path="/bookmarks" element={<BookmarksPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
             </Route>
             <Route path="*" element={<HomeRedirect />} />
           </Routes>

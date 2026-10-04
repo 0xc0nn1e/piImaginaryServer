@@ -57,7 +57,9 @@ Upload and processing have deliberately different lifecycles:
    transcription, diarization, and merging.
 5. Committing the transcript queues the optional LLM work as jobs of its own,
    so an LM Studio failure is retried on its own budget instead of being lost
-   beside a transcript the job already reported as finished.
+   beside a transcript the job already reported as finished. Whether analysis
+   and the Cantonese translation follow on their own is a system-wide switch on
+   the web UI's Settings page; transcription itself always runs.
 6. Clients poll status and retrieve the segment-level transcript.
 
 PostgreSQL is both the application database and the MVP job queue. This avoids
@@ -313,16 +315,17 @@ this, or pin the proxy to a known address and trust only that.
 The browser UI uses an opaque database-backed session. Login sets an HttpOnly
 `audio_server_session` cookie and a readable SameSite Strict
 `audio_server_csrf` cookie. The SPA reads the CSRF cookie only for logout,
-browser upload, editing, reprocessing, and deletion and echoes it in
-`X-CSRF-Token`; it never stores
+browser upload, editing, reprocessing, deletion, and settings changes and
+echoes it in `X-CSRF-Token`; it never stores
 credentials in `localStorage` or `sessionStorage`. Setup requires the exact
 `WEB_ALLOWED_ORIGIN` plus the
 one-time `WEB_SETUP_TOKEN` in `X-Setup-Token`. Passwords and raw session tokens
 are not stored in plaintext.
 
 An authenticated browser session may read the recording list, metadata,
-status, transcript, analysis, and activity endpoints. Browser upload, editing,
-reprocessing, and deletion additionally require the exact configured Origin and CSRF token.
+status, transcript, analysis, activity, and processing settings endpoints.
+Browser upload, editing, reprocessing, deletion, and settings changes
+additionally require the exact configured Origin and CSRF token.
 Bearer-authenticated machine clients may use the same mutation endpoints
 without browser CSRF headers. Upload and the legacy failed-job retry endpoint
 remain machine-Bearer-only. The detail UI may stream the private original through
@@ -493,6 +496,8 @@ must inspect and quarantine repeatedly rejected client items.
 | `GET` | `/api/v1/bookmarks` | Saved expressions/highlights for the signed-in administrator; optional `kind` filter. |
 | `POST` | `/api/v1/bookmarks` | Save an analysis quote as a snapshot; Origin and CSRF required. |
 | `DELETE` | `/api/v1/bookmarks/{id}` | Remove one saved quote; Origin and CSRF required. |
+| `GET` | `/api/v1/settings/processing` | Whether analysis and the Cantonese translation follow each transcript automatically. |
+| `PATCH` | `/api/v1/settings/processing` | Set `auto_analysis` and/or `auto_translation`; only the switches sent are written. |
 
 List requests accept `limit` (default 50, maximum 100), `offset`, `device_id`,
 and `status`. Transcript or analysis requests made before the result is ready
@@ -516,6 +521,14 @@ bookmarks rather than removing them: `recording_id` becomes null,
 `source_deleted_at` is set, and `source_label` preserves the original filename.
 Saving the same quote twice is idempotent, keyed on kind plus exact Japanese
 text within a recording.
+
+Processing settings belong to the whole system rather than to one account, so
+like the recording mutations they accept a browser session (Origin and CSRF
+required for a change) or the machine Bearer credential. A change names only
+the switches it sets -- `{"auto_analysis": false}` leaves the translation switch
+as it is -- so two tabs flipping different switches cannot undo each other.
+Values must be JSON booleans; an empty body, `null`, or an unknown switch is
+rejected with `422`. Transcription has no switch.
 
 ### Japanese reading aids
 
@@ -553,8 +566,8 @@ where it is enabled.
 
 ## Web management UI
 
-The React/TypeScript SPA is served by an unprivileged Nginx container. It has
-five browser routes:
+The React/TypeScript SPA is served by an unprivileged Nginx container. Its
+browser routes include:
 
 - `/setup`: one-time administrator creation
 - `/login`: administrator sign-in
@@ -563,6 +576,8 @@ five browser routes:
   bilingual analysis, separate retranscription/reanalysis, and permanent deletion
 - `/bookmarks`: saved natural expressions and highlights, filterable by kind, each
   linking back to its recording while that recording still exists
+- `/settings`: system-wide switches for whether analysis and the Cantonese
+  translation follow each transcript automatically; transcription is always on
 
 The interface defaults to Japanese and can be switched to Hong Kong
 Traditional Chinese from the login, setup, desktop sidebar, or mobile header.
@@ -689,6 +704,20 @@ holds one active job at a time, so the successor is inserted only after the job
 that queued it reaches a terminal status. Analysis leads because it is what a
 reviewer waits for; a terminal analysis failure still queues the translation,
 since the two are independent readings of the same transcript.
+
+The Settings page switches each LLM step of that chain on or off for the whole
+system. The switches live in a single `processing_settings` row and are read
+inside the transaction that commits the hand-off, not when the recording was
+uploaded, so turning a step off also covers recordings still waiting for their
+transcript, and a retry or re-transcription follows the switches as they stand
+when it finishes. A step that is off is passed over rather than ending the
+chain: with analysis off and translation on, the transcript goes straight to
+its translation. Jobs already in the queue are left to run, and a switched-off
+step can still be queued by hand from a recording or day page. Re-transcribing
+with translation off removes the machine translations along with the segments
+they belonged to (hand-written ones are carried across as usual) until a
+translation is asked for again; with analysis off, the previous analysis stays
+flagged as stale until one is.
 
 Re-transcription flags the previous analysis as stale rather than clearing it,
 and a skipped or empty run never replaces a stored reading, so the last good
@@ -841,6 +870,10 @@ LM_STUDIO_CHUNK_CHARS=12000
 LM_STUDIO_MAX_TOKENS=4096
 ```
 
+`LLM_ENABLED` decides whether the worker can reach LM Studio at all. The web
+UI's Settings page decides something narrower: whether analysis and the
+Cantonese translation are queued after each transcript without being asked for.
+
 On the 5090 computer, enable LM Studio's server and **Serve on Local Network**,
 enable API-token authentication, and create a least-privilege token that can
 list loaded models and run inference. Firewall the port to the audio server's
@@ -889,6 +922,10 @@ Revision `0003_processing_activity` backfills lifecycle events from existing
 jobs and therefore requires an online database connection. Generating an
 offline SQL script across that revision intentionally fails rather than
 producing an incomplete activity history.
+
+Revision `0012_processing_settings` seeds its single row with both automatic
+LLM steps switched on, so upgrading changes nothing until an administrator
+turns one off. Rolling it back drops that choice; older code always queues both.
 
 Compose uses one PostgreSQL login for migrations and runtime access to keep the
 MVP easy to operate. A hardened production deployment should split the schema

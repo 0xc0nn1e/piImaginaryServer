@@ -32,6 +32,7 @@ from audio_server.processing.contracts import (
     PipelineResult,
 )
 from audio_server.processing.contracts import AnalysisStatus as PipelineAnalysisStatus
+from audio_server.services.processing_settings_service import ProcessingSettingsService
 from audio_server.worker_runtime import _analysis_result_persister, _result_persister
 
 BASE_TIME = datetime(2026, 9, 3, 1, 0, tzinfo=UTC)
@@ -99,6 +100,17 @@ def _uploaded(
             available_at=BASE_TIME,
         )
     return recording_id
+
+
+def _switch(
+    session_factory: sessionmaker[Session],
+    *,
+    analysis: bool | None = None,
+    translation: bool | None = None,
+) -> None:
+    ProcessingSettingsService(session_factory=session_factory).update(
+        auto_analysis=analysis, auto_translation=translation
+    )
 
 
 def _jobs(
@@ -241,6 +253,127 @@ def test_a_failed_transcription_queues_no_analysis(
 
     # There is no transcript to read, so nothing is queued to read one.
     assert [job.kind for job in _jobs(session_factory, recording_id)] == [JobKind.FULL]
+
+
+def test_with_analysis_switched_off_the_transcript_goes_straight_to_translation(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id = _uploaded(session_factory)
+    _switch(session_factory, analysis=False)
+    queue = _queue(session_factory)
+
+    claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=1))
+    assert claim is not None and claim.kind is JobKind.FULL
+    queue.complete(claim, now=BASE_TIME + timedelta(seconds=2))
+
+    jobs = _jobs(session_factory, recording_id)
+    # A step that is off is passed over rather than ending the chain.
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.TRANSLATION]
+    assert jobs[1].status is JobStatus.QUEUED
+    assert jobs[1].follow_up_kind is None
+
+
+def test_with_translation_switched_off_the_chain_ends_after_analysis(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id = _uploaded(session_factory)
+    _switch(session_factory, translation=False)
+    queue = _queue(session_factory)
+
+    for second in (1, 3):
+        claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=second))
+        assert claim is not None
+        queue.complete(claim, now=BASE_TIME + timedelta(seconds=second + 1))
+
+    jobs = _jobs(session_factory, recording_id)
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.ANALYSIS]
+    assert all(job.status is JobStatus.COMPLETED for job in jobs)
+    assert queue.claim_next(now=BASE_TIME + timedelta(seconds=10)) is None
+
+
+def test_with_both_switched_off_a_recording_is_only_transcribed(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id = _uploaded(session_factory)
+    _switch(session_factory, analysis=False, translation=False)
+    queue = _queue(session_factory)
+
+    claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=1))
+    assert claim is not None
+    queue.complete(claim, now=BASE_TIME + timedelta(seconds=2))
+
+    assert [job.kind for job in _jobs(session_factory, recording_id)] == [JobKind.FULL]
+    with session_factory() as session:
+        recording = session.get(Recording, recording_id)
+    assert recording is not None
+    assert recording.processing_status is RecordingStatus.COMPLETED
+    assert queue.claim_next(now=BASE_TIME + timedelta(seconds=10)) is None
+
+
+def test_the_switches_are_read_when_the_transcript_lands_not_at_upload(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Uploaded while both steps were on.
+    recording_id = _uploaded(session_factory)
+    queue = _queue(session_factory)
+    claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=1))
+    assert claim is not None
+
+    # Both are switched off while Whisper is still running, which is exactly
+    # when a backlog of uploads is waiting for its transcripts.
+    _switch(session_factory, analysis=False, translation=False)
+    queue.complete(claim, now=BASE_TIME + timedelta(seconds=2))
+
+    assert [job.kind for job in _jobs(session_factory, recording_id)] == [JobKind.FULL]
+
+
+def test_a_failed_analysis_leaves_a_switched_off_translation_unqueued(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id = _uploaded(session_factory, max_attempts=1)
+    queue = _queue(session_factory)
+    claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=1))
+    assert claim is not None
+    queue.complete(claim, now=BASE_TIME + timedelta(seconds=2))
+
+    _switch(session_factory, translation=False)
+    analysis_claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=3))
+    assert analysis_claim is not None and analysis_claim.kind is JobKind.ANALYSIS
+    queue.fail(
+        analysis_claim,
+        JobFailure(
+            code="lmstudio_schema_invalid",
+            error_type="PermanentProcessingError",
+            message="LM Studio returned an invalid structured analysis.",
+            retryable=False,
+        ),
+        now=BASE_TIME + timedelta(seconds=4),
+    )
+
+    jobs = _jobs(session_factory, recording_id)
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.ANALYSIS]
+    assert jobs[1].status is JobStatus.FAILED
+
+
+def test_an_abandoned_analysis_leaves_a_switched_off_translation_unqueued(
+    session_factory: sessionmaker[Session],
+) -> None:
+    recording_id = _uploaded(session_factory, max_attempts=1)
+    queue = _queue(session_factory)
+    claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=1))
+    assert claim is not None
+    queue.complete(claim, now=BASE_TIME + timedelta(seconds=2))
+
+    _switch(session_factory, translation=False)
+    analysis_claim = queue.claim_next(now=BASE_TIME + timedelta(seconds=3))
+    assert analysis_claim is not None
+    # The worker dies holding the lease and the attempt budget is spent.
+    summary = queue.recover_expired(now=BASE_TIME + timedelta(seconds=120))
+
+    assert summary.failed == 1
+    jobs = _jobs(session_factory, recording_id)
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.ANALYSIS]
+    assert jobs[1].status is JobStatus.FAILED
 
 
 def test_an_analysis_asked_for_by_hand_does_not_drag_translation_behind_it(

@@ -11,6 +11,7 @@ import type {
   DayListResponse,
   DaySummaryQueuedResponse,
   ProcessingRequestResponse,
+  ProcessingSettings,
   QueueResponse,
   RecordingListResponse,
   RecordingNeighboursResponse,
@@ -305,6 +306,21 @@ function requireCsrfCookie(): string {
 
 export function getQueue(): Promise<QueueResponse> {
   return request<QueueResponse>("/api/v1/queue");
+}
+
+export function getProcessingSettings(): Promise<ProcessingSettings> {
+  return request<ProcessingSettings>("/api/v1/settings/processing");
+}
+
+/** Sends only the switches being changed, so two tabs cannot undo each other. */
+export function updateProcessingSettings(
+  changes: Partial<ProcessingSettings>,
+): Promise<ProcessingSettings> {
+  return request<ProcessingSettings>("/api/v1/settings/processing", {
+    method: "PATCH",
+    body: changes,
+    csrfToken: requireCsrfCookie(),
+  });
 }
 
 export function setRecordingChecked(

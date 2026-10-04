@@ -13,6 +13,7 @@ from audio_server.api.health import router as health_router
 from audio_server.api.jobs import router as queue_router
 from audio_server.api.middleware import MULTIPART_OVERHEAD_BYTES, ApiRequestGuardMiddleware
 from audio_server.api.recordings import router as recordings_router
+from audio_server.api.settings import router as settings_router
 from audio_server.api.web_recordings import router as web_recordings_router
 from audio_server.core.config import Settings, get_settings
 from audio_server.core.database import Database, create_database
@@ -22,6 +23,7 @@ from audio_server.processing.audio import AudioProcessor, FFmpegSettings
 from audio_server.processing.contracts import AudioPreprocessor
 from audio_server.services.bookmark_service import BookmarkService
 from audio_server.services.daily_service import DailyService
+from audio_server.services.processing_settings_service import ProcessingSettingsService
 from audio_server.services.recording_service import RecordingService
 from audio_server.services.storage import LocalStorageBackend, StorageBackend
 from audio_server.web_auth import (
@@ -96,6 +98,9 @@ def create_app(
         session_factory=active_database.session_factory,
         max_attempts=active_settings.processing_max_attempts,
     )
+    application.state.processing_settings_service = ProcessingSettingsService(
+        session_factory=active_database.session_factory
+    )
 
     application.add_middleware(
         ApiRequestGuardMiddleware,
@@ -118,6 +123,7 @@ def create_app(
     application.include_router(activity_router)
     application.include_router(bookmarks_router)
     application.include_router(days_router)
+    application.include_router(settings_router)
     return application
 
 

@@ -23,6 +23,7 @@ from sqlalchemy import (
     false,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -242,6 +243,8 @@ class ProcessingJob(Base):
     # running it inline, so a transient LM Studio failure is retried on its own
     # budget rather than silently lost alongside a completed transcript. NULL on
     # a job queued by hand, so one button never sets off the other's work.
+    # ``ProcessingSettings`` is read at the hand-off itself, so a step the
+    # administrator has switched off by then is passed over.
     follow_up_kind: Mapped[JobKind | None] = mapped_column(
         enum_column(JobKind, name="processing_job_follow_up_kind")
     )
@@ -407,6 +410,37 @@ class Analysis(Base):
 
     recording: Mapped[Recording] = relationship(back_populates="analyses")
     job: Mapped[ProcessingJob] = relationship(back_populates="analyses")
+
+
+PROCESSING_SETTINGS_ID = 1
+
+
+class ProcessingSettings(Base):
+    """System-wide switches for the LLM work queued behind a finished transcript.
+
+    The check constraint pins the table to one row, so there is only ever one
+    answer. Transcription has no switch: every recording is transcribed. The
+    migration seeds the row with both switches on, which is how every upload
+    was processed before they existed.
+    """
+
+    __tablename__ = "processing_settings"
+    __table_args__ = (
+        CheckConstraint(f"id = {PROCESSING_SETTINGS_ID}", name="processing_settings_singleton"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=False, default=PROCESSING_SETTINGS_ID
+    )
+    auto_analysis: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    auto_translation: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Bookmark(Base):

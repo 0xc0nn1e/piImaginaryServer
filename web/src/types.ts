@@ -55,6 +55,12 @@ export interface RecordingListResponse {
   offset: number;
 }
 
+/** Which LLM steps run on their own once a transcript is committed. */
+export interface ProcessingSettings {
+  auto_analysis: boolean;
+  auto_translation: boolean;
+}
+
 export interface DailyKeyPoint {
   recording_id: string | null;
   ja: string;

@@ -360,6 +360,11 @@ export function RecordingDetailPage() {
   const translationJobActive =
     status?.job?.kind === "translation" &&
     (status.job.status === "queued" || status.job.status === "processing");
+  // Automatic analysis can be switched off, so a recording without one is
+  // only "being prepared" while an analysis job is actually waiting or running.
+  const analysisJobActive =
+    status?.job?.kind === "analysis" &&
+    (status.job.status === "queued" || status.job.status === "processing");
 
   useEffect(() => {
     if (translationJobActive) {
@@ -906,7 +911,7 @@ export function RecordingDetailPage() {
             </div>
           </div>
           {analysis.kind === "loading" || analysis.kind === "idle" ? <LoadingView label={t("analysis.loading")} /> : null}
-          {analysis.kind === "pending" ? <div className="panel empty-state compact-empty"><h3>{t("analysis.pending")}</h3><p>{t("analysis.pendingHelp")}</p></div> : null}
+          {analysis.kind === "pending" ? <div className="panel empty-state compact-empty"><h3>{t(analysisJobActive ? "analysis.pending" : "analysis.none")}</h3><p>{t(analysisJobActive ? "analysis.pendingHelp" : "analysis.noneHelp")}</p></div> : null}
           {analysis.kind === "error" ? <div className="notice notice-error" role="alert">{analysis.message}</div> : null}
           {analysis.kind === "ready" && analysis.data.status === "stale" ? <div className="notice notice-action" role="status">{t("analysis.stale")}</div> : null}
           {analysis.kind === "ready" && analysis.data.status === "skipped" ? <div className="notice notice-action" role="status">{t("analysis.skipped")}</div> : null}

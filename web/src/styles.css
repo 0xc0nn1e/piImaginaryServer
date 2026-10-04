@@ -2812,3 +2812,130 @@ blockquote:has(ruby),
   accent-color: rgb(189 124 255);
   cursor: pointer;
 }
+
+/* Settings: system-wide switches for the work that follows a transcript. */
+.settings-page .panel {
+  max-width: 860px;
+}
+
+.settings-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+}
+
+.setting-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.setting-name {
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.setting-help {
+  max-width: 560px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 10px;
+  align-items: center;
+  color: var(--muted-strong);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  font-weight: 560;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.switch:has(input:disabled) {
+  cursor: default;
+}
+
+.switch:has(input[aria-disabled="true"]) {
+  cursor: progress;
+}
+
+.switch-track {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 5%);
+  transition: 150ms ease;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #6d6c78;
+  transition: 150ms ease;
+}
+
+.switch input:checked + .switch-track {
+  border-color: rgb(189 124 255 / 55%);
+  background: rgb(189 124 255 / 22%);
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  background: var(--violet);
+  transform: translateX(20px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--violet);
+  outline-offset: 3px;
+}
+
+.switch input:disabled + .switch-track,
+.switch input[aria-disabled="true"] + .switch-track {
+  opacity: 0.55;
+}
+
+.switch-state {
+  min-width: 4.5em;
+}
+
+.settings-notes {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 18px 0 0 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
+@media (max-width: 430px) {
+  .setting-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}

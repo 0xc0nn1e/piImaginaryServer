@@ -20,6 +20,7 @@ from audio_server.db.models import (
     JobStage,
     JobStatus,
     ProcessingJob,
+    ProcessingSettings,
     Recording,
     RecordingStatus,
 )
@@ -33,6 +34,7 @@ from audio_server.jobs.queue import (
     retry_failed_recording,
 )
 from audio_server.services.daily_service import DailyService
+from audio_server.services.processing_settings_service import ProcessingSettingsService
 
 pytestmark = pytest.mark.integration
 
@@ -80,7 +82,9 @@ def postgres_factory() -> Iterator[sessionmaker[Session]]:
 @pytest.fixture
 def empty_database(postgres_factory: sessionmaker[Session]) -> sessionmaker[Session]:
     with postgres_factory() as session, session.begin():
-        for model in (ProcessingJob, Recording):
+        # The schema lives for the whole module, so a switch one test turns off
+        # must not leak into the next one's chain.
+        for model in (ProcessingJob, Recording, ProcessingSettings):
             session.query(model).delete()
     return postgres_factory
 
@@ -170,6 +174,34 @@ def test_completing_transcription_queues_its_analysis_under_the_active_job_index
     assert analysis_claim is not None
     assert analysis_claim.kind is JobKind.ANALYSIS
     assert analysis_claim.stage is JobStage.ANALYZING
+
+
+def test_a_switched_off_analysis_hands_the_transcript_to_translation_under_the_index(
+    empty_database: sessionmaker[Session],
+) -> None:
+    ProcessingSettingsService(session_factory=empty_database).update(auto_analysis=False)
+    recording_id, _job_id = _add_recording_with_job(empty_database)
+    queue = _queue(empty_database, "switch-worker")
+
+    claim = queue.claim_next()
+    assert claim is not None
+    queue.complete(claim)
+
+    with empty_database() as session:
+        jobs = list(
+            session.scalars(
+                select(ProcessingJob)
+                .where(ProcessingJob.recording_id == recording_id)
+                .order_by(ProcessingJob.available_at)
+            )
+        )
+    assert [job.kind for job in jobs] == [JobKind.FULL, JobKind.TRANSLATION]
+    assert jobs[1].status is JobStatus.QUEUED
+
+    translation_claim = queue.claim_next()
+    assert translation_claim is not None
+    assert translation_claim.kind is JobKind.TRANSLATION
+    assert translation_claim.stage is JobStage.TRANSLATING
 
 
 def test_skip_locked_allows_another_worker_to_claim_next_job(

@@ -6,7 +6,7 @@ from datetime import date, datetime
 from math import isfinite
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 from audio_server.db.models import (
     AnalysisStatus,
@@ -127,6 +127,35 @@ class RecordingListResponse(BaseModel):
     items: list[RecordingSummary]
     limit: int
     offset: int
+
+
+class ProcessingSettingsResponse(BaseModel):
+    """Which LLM steps run on their own once a transcript is committed.
+
+    Transcription has no switch: every recording is transcribed.
+    """
+
+    auto_analysis: bool
+    auto_translation: bool
+
+
+class ProcessingSettingsUpdate(BaseModel):
+    """A partial change: only the switches present in the body are written."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_analysis: StrictBool | None = None
+    auto_translation: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def require_explicit_switches(self) -> ProcessingSettingsUpdate:
+        if not self.model_fields_set:
+            raise ValueError("at least one setting must be provided")
+        # None here only means "absent". A null sent on purpose is neither on
+        # nor off, so it is refused rather than silently ignored.
+        if any(getattr(self, name) is None for name in self.model_fields_set):
+            raise ValueError("a provided setting must be true or false")
+        return self
 
 
 class JobError(BaseModel):

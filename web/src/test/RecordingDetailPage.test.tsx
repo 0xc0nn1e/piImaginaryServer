@@ -178,6 +178,12 @@ function mockDetailApi(transcriptResponse: Response) {
   });
 }
 
+/** Neither way of saying that no analysis is on screen yet. */
+function expectNoPendingAnalysis() {
+  expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+  expect(screen.queryByText("仲未有分析")).not.toBeInTheDocument();
+}
+
 afterEach(() => {
   window.history.replaceState({}, "", "/");
   document.cookie = "audio_server_csrf=; Max-Age=0; Path=/";
@@ -258,7 +264,7 @@ describe("recording transcript states", () => {
     expect(
       await screen.findByText("LM Studio is temporarily unavailable."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+    expectNoPendingAnalysis();
   });
 
   it("re-asks for an analysis that was still preparing when the tab was left", async () => {
@@ -283,7 +289,7 @@ describe("recording transcript states", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "meeting.flac" });
     await browser.click(screen.getByRole("tab", { name: "分析" }));
-    await screen.findByText("分析仍在準備中");
+    await screen.findByText("仲未有分析");
 
     // The job gives up while the reader is looking at something else, so no
     // polling is left running to notice it.
@@ -294,7 +300,7 @@ describe("recording transcript states", () => {
     expect(
       await screen.findByText("LM Studio is temporarily unavailable."),
     ).toBeInTheDocument();
-    expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+    expectNoPendingAnalysis();
   });
 
   it("does not let a slow earlier analysis answer bury the newer failure", async () => {
@@ -359,7 +365,78 @@ describe("recording transcript states", () => {
     });
 
     expect(screen.getByText("LM Studio is temporarily unavailable.")).toBeInTheDocument();
+    expectNoPendingAnalysis();
+  });
+
+  it("calls an analysis in preparation only while its job is waiting or running", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/status")) {
+        return Promise.resolve(
+          jsonResponse({
+            ...completedStatus,
+            job: { ...completedStatus.job, id: "job-2", kind: "analysis", status: "queued" },
+          }),
+        );
+      }
+      if (path.endsWith("/analysis")) {
+        return Promise.resolve(
+          jsonResponse(
+            { error: { code: "analysis_not_ready", message: "Analysis is not available yet." } },
+            409,
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(await screen.findByRole("heading", { name: "分析仍在準備中" })).toBeInTheDocument();
+    expect(screen.getByText("LM Studio 正喺背景分析，完成之後會自動顯示。")).toBeInTheDocument();
+  });
+
+  it("does not promise an analysis that automatic analysis is not bringing", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/analysis")) {
+        return Promise.resolve(
+          jsonResponse(
+            { error: { code: "analysis_not_ready", message: "Analysis is not available yet." } },
+            409,
+          ),
+        );
+      }
+      return base(input, init);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    // The transcript is finished and no analysis job is waiting, which is what
+    // a recording looks like when automatic analysis is switched off.
+    expect(await screen.findByRole("heading", { name: "仲未有分析" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "開咗自動分析嘅話，逐字稿完成之後就會開始分析；如果冇開始，可以撳「再分析」安排。",
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText("分析仍在準備中")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "再分析" })).toBeEnabled();
   });
 
   it("does not let an analysis read from before a transcript edit hide the staleness", async () => {
