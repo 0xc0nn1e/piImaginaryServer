@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Protocol, TypeVar, cast
+from typing import ClassVar, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -32,6 +32,7 @@ from audio_server.processing.errors import (
     ProviderConfigurationError,
     RetryableProcessingError,
 )
+from audio_server.processing.strata import StrataSettings, strata_client
 
 
 class DisabledAnalysisProvider:
@@ -88,6 +89,10 @@ class DisabledTranslationProvider:
 
 @dataclass(frozen=True, slots=True)
 class LMStudioSettings:
+    # Stored with each result and used as the prefix of its error codes.
+    provider_name: ClassVar[str] = "lmstudio"
+    provider_label: ClassVar[str] = "LM Studio"
+
     host: str
     api_key: str = ""
     timeout_seconds: int = 600
@@ -103,6 +108,11 @@ class LMStudioSettings:
             raise ValueError("LM Studio chunk size is out of range")
         if not 256 <= self.max_tokens <= 32_768:
             raise ValueError("LM Studio max tokens is out of range")
+
+
+# The local LLM server a step talks to. Each settings class names its server,
+# and that name is stored with every result and prefixes every error code.
+LLMSettings = LMStudioSettings | StrataSettings
 
 
 logger = logging.getLogger(__name__)
@@ -234,33 +244,39 @@ class _GenerationAnalysisDraft(BaseModel):
 
 
 class _LoadedModel(Protocol):
-    identifier: object
+    @property
+    def identifier(self) -> object: ...
 
     def respond(self, prompt: str, **kwargs: object) -> object: ...
 
 
 class _LMStudioClient(Protocol):
+    """The client shape every LLM step uses: LM Studio's SDK, or Strata's adapter."""
+
     def list_loaded_models(self, namespace: str | None = None) -> Sequence[_LoadedModel]: ...
 
 
-ClientFactory = Callable[[LMStudioSettings], AbstractContextManager[_LMStudioClient]]
+ClientFactory = Callable[[LLMSettings], AbstractContextManager[_LMStudioClient]]
 
 
 class LMStudioAnalysisProvider:
-    """Analyze every transcript chunk using the one LLM already loaded in LM Studio."""
+    """Analyze every transcript chunk using the one LLM already loaded in the server.
+
+    The server is LM Studio or Strata, whichever ``settings`` describes.
+    """
 
     def __init__(
         self,
-        settings: LMStudioSettings,
+        settings: LLMSettings,
         *,
         client_factory: ClientFactory | None = None,
     ) -> None:
         self._settings = settings
-        self._client_factory = client_factory or _sdk_client
+        self._client_factory = client_factory or _open_client
 
     @property
     def name(self) -> str:
-        return "lmstudio"
+        return self._settings.provider_name
 
     def load(self) -> None:
         """Intentionally performs no network/model operation during worker startup."""
@@ -292,15 +308,18 @@ class LMStudioAnalysisProvider:
                 data=empty.model_dump(mode="json"),
             )
 
+        server, label = self._settings.provider_name, self._settings.provider_label
         try:
             with self._client_factory(self._settings) as client:
                 loaded = list(client.list_loaded_models("llm"))
                 if len(loaded) != 1:
-                    code = "lmstudio_model_not_loaded" if not loaded else "lmstudio_multiple_models"
+                    code = (
+                        f"{server}_model_not_loaded" if not loaded else f"{server}_multiple_models"
+                    )
                     message = (
-                        "Load exactly one LLM in LM Studio before running analysis."
+                        f"Load exactly one LLM in {label} before running analysis."
                         if not loaded
-                        else "Unload extra LLMs in LM Studio so exactly one remains loaded."
+                        else f"Unload extra LLMs in {label} so exactly one remains loaded."
                     )
                     raise ProviderConfigurationError(code=code, safe_message=message)
                 model = loaded[0]
@@ -326,13 +345,15 @@ class LMStudioAnalysisProvider:
         except ProcessingError:
             raise
         except Exception as exc:
-            raise classify_lmstudio_failure(
+            raise classify_llm_failure(
                 exc,
-                permanent_code="lmstudio_analysis_failed",
-                permanent_message="LM Studio could not produce a valid structured analysis.",
+                self._settings,
+                permanent_code=f"{server}_analysis_failed",
+                permanent_message=f"{label} could not produce a valid structured analysis.",
             ) from exc
 
     def _respond(self, model: _LoadedModel, prompt: str) -> _AnalysisDraft:
+        server, label = self._settings.provider_name, self._settings.provider_label
         try:
             response = model.respond(
                 prompt,
@@ -344,17 +365,17 @@ class LMStudioAnalysisProvider:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.
             logger.warning(
-                "LM Studio analysis failed schema validation",
-                extra={"violations": _safe_violations(exc)},
+                "LLM analysis failed schema validation",
+                extra={"provider": server, "violations": _safe_violations(exc)},
             )
             raise PermanentProcessingError(
-                code="lmstudio_schema_invalid",
-                safe_message="LM Studio returned an invalid structured analysis.",
+                code=f"{server}_schema_invalid",
+                safe_message=f"{label} returned an invalid structured analysis.",
             ) from exc
         except (TypeError, ValueError) as exc:
             raise PermanentProcessingError(
-                code="lmstudio_schema_invalid",
-                safe_message="LM Studio returned an invalid structured analysis.",
+                code=f"{server}_schema_invalid",
+                safe_message=f"{label} returned an invalid structured analysis.",
             ) from exc
 
 
@@ -431,7 +452,7 @@ def structured_payload(response: object, schema: type[ModelT]) -> ModelT:
     # The values are model output and must never be logged; their types, and
     # the flag the SDK set, are not.
     logger.warning(
-        "LM Studio structured response has an unreadable shape",
+        "LLM structured response has an unreadable shape",
         extra={
             "response_type": type(response).__name__,
             "parsed_type": type(parsed).__name__,
@@ -439,7 +460,7 @@ def structured_payload(response: object, schema: type[ModelT]) -> ModelT:
             "structured_flag": bool(getattr(response, "structured", True)),
         },
     )
-    raise ValueError("LM Studio structured response is missing parsed data")
+    raise ValueError("LLM structured response is missing parsed data")
 
 
 def _candidates(response: object) -> tuple[Mapping[str, object], ...]:
@@ -518,19 +539,26 @@ def _json_objects_in(text: str) -> list[Mapping[str, object]]:
     return found
 
 
-def classify_lmstudio_failure(
-    exc: Exception, *, permanent_code: str, permanent_message: str
+def classify_llm_failure(
+    exc: Exception,
+    settings: LLMSettings,
+    *,
+    permanent_code: str,
+    permanent_message: str,
 ) -> ProcessingError:
-    """Map an SDK failure onto the retry policy.
+    """Map a client failure onto the retry policy.
 
-    Every LM Studio call has to classify failures the same way, or one feature
-    would retry a misconfiguration the other treats as fatal.
+    Every LLM call has to classify failures the same way, or one feature
+    would retry a misconfiguration the other treats as fatal. Strata's client
+    already raises processing errors for what it recognises, so for Strata
+    this only sees the unexpected.
     """
 
+    server, label = settings.provider_name, settings.provider_label
     if isinstance(exc, TimeoutError | ConnectionError | OSError):
         return RetryableProcessingError(
-            code="lmstudio_unavailable",
-            safe_message="LM Studio is temporarily unavailable.",
+            code=f"{server}_unavailable",
+            safe_message=f"{label} is temporarily unavailable.",
         )
     error_name = type(exc).__name__.lower()
     error_text = str(exc).casefold()
@@ -543,28 +571,31 @@ def classify_lmstudio_failure(
         or "forbidden" in error_text
     ):
         return ProviderConfigurationError(
-            code="lmstudio_authentication_failed",
-            safe_message="LM Studio rejected the configured API token.",
+            code=f"{server}_authentication_failed",
+            safe_message=f"{label} rejected the configured API token.",
         )
     if "timeout" in error_name or "websocket" in error_name or "client" in error_name:
         return RetryableProcessingError(
-            code="lmstudio_unavailable",
-            safe_message="LM Studio is temporarily unavailable.",
+            code=f"{server}_unavailable",
+            safe_message=f"{label} is temporarily unavailable.",
         )
     return PermanentProcessingError(code=permanent_code, safe_message=permanent_message)
 
 
-def require_single_loaded_model(client: _LMStudioClient) -> _LoadedModel:
+def require_single_loaded_model(
+    client: _LMStudioClient, settings: LLMSettings
+) -> _LoadedModel:
     """Refuse to guess which model to use when the operator loaded several."""
 
     loaded = list(client.list_loaded_models("llm"))
     if len(loaded) == 1:
         return loaded[0]
-    code = "lmstudio_model_not_loaded" if not loaded else "lmstudio_multiple_models"
+    server, label = settings.provider_name, settings.provider_label
+    code = f"{server}_model_not_loaded" if not loaded else f"{server}_multiple_models"
     message = (
-        "Load exactly one LLM in LM Studio before running this step."
+        f"Load exactly one LLM in {label} before running this step."
         if not loaded
-        else "Unload extra LLMs in LM Studio so exactly one remains loaded."
+        else f"Unload extra LLMs in {label} so exactly one remains loaded."
     )
     raise ProviderConfigurationError(code=code, safe_message=message)
 
@@ -801,5 +832,9 @@ class _SDKClientManager(AbstractContextManager[_LMStudioClient]):
         return None
 
 
-def _sdk_client(settings: LMStudioSettings) -> AbstractContextManager[_LMStudioClient]:
+def _open_client(settings: LLMSettings) -> AbstractContextManager[_LMStudioClient]:
+    """Open a client for whichever server ``LLM_PROVIDER`` selected."""
+
+    if isinstance(settings, StrataSettings):
+        return strata_client(settings)
     return _SDKClientManager(settings)

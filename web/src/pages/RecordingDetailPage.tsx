@@ -82,6 +82,17 @@ function cloneResult(result: AnalysisResultV2): AnalysisResultV2 {
   return clone;
 }
 
+/**
+ * Names the LLM server that wrote the analysis on screen. The worker can use
+ * LM Studio or Strata and the browser is never told which is configured, so
+ * anything else -- no analysis yet, or one edited by hand -- reads as "LLM".
+ */
+function analysisSourceLabel(provider: string | null): string {
+  if (provider === "lmstudio") return "LM Studio";
+  if (provider === "strata") return "Strata";
+  return "LLM";
+}
+
 export function RecordingDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
@@ -898,7 +909,7 @@ export function RecordingDetailPage() {
       {tab === "analysis" ? (
         <section aria-labelledby="tab-analysis" className="tab-panel analysis-stack" id="panel-analysis" role="tabpanel">
           <div className="panel analysis-toolbar">
-            <div><p className="panel-kicker">LM Studio</p><h2>{t("analysis.title")}</h2></div>
+            <div><p className="panel-kicker">{analysisSourceLabel(analysis.kind === "ready" ? analysis.data.provider : null)}</p><h2>{t("analysis.title")}</h2></div>
             <div className="inline-actions">
               {analysisDraft ? <>
                 <button className="button" disabled={mutationPending !== null} type="button" onClick={() => void saveAnalysis()}>{mutationPending === "analysis" ? t("detail.saving") : t("detail.save")}</button>

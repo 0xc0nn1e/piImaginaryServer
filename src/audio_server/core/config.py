@@ -83,12 +83,19 @@ class Settings(BaseSettings):
     huggingface_token: SecretStr = SecretStr("")
 
     llm_enabled: bool = False
+    # The local LLM server the worker sends transcript text to: lmstudio or strata.
     llm_provider: str = "disabled"
     lm_studio_host: str = "127.0.0.1:1234"
     lm_studio_api_key: SecretStr = SecretStr("")
     lm_studio_timeout_seconds: int = 600
     lm_studio_chunk_chars: int = 12_000
     lm_studio_max_tokens: int = 4096
+    # Strata's OpenAI-compatible server root, without /v1.
+    strata_base_url: str = "http://127.0.0.1:47831"
+    strata_api_key: SecretStr = SecretStr("")
+    strata_timeout_seconds: int = 600
+    strata_chunk_chars: int = 12_000
+    strata_max_tokens: int = 4096
 
     worker_job_kinds: str = ""
 
@@ -112,6 +119,11 @@ class Settings(BaseSettings):
                 "WORKER_JOB_KINDS may only list full, analysis, translation and daily_summary"
             )
         return ",".join(entries)
+
+    @field_validator("llm_provider")
+    @classmethod
+    def normalize_llm_provider(cls, value: str) -> str:
+        return value.strip().lower()
 
     @field_validator("log_level")
     @classmethod
@@ -177,6 +189,9 @@ class Settings(BaseSettings):
         "lm_studio_timeout_seconds",
         "lm_studio_chunk_chars",
         "lm_studio_max_tokens",
+        "strata_timeout_seconds",
+        "strata_chunk_chars",
+        "strata_max_tokens",
     )
     @classmethod
     def positive_integer(cls, value: int) -> int:
@@ -220,17 +235,54 @@ class Settings(BaseSettings):
             raise ValueError("RETRY_MAX_SECONDS must be at least RETRY_BASE_SECONDS")
         if self.llm_enabled and self.llm_provider == "disabled":
             raise ValueError("LLM_PROVIDER must be configured when LLM_ENABLED is true")
-        if self.llm_enabled and self.llm_provider != "lmstudio":
-            raise ValueError("LLM_PROVIDER must be lmstudio when LLM_ENABLED is true")
-        if self.llm_enabled and (
-            not self.lm_studio_host.strip() or ":" not in self.lm_studio_host
+        if self.llm_enabled and self.llm_provider not in {"lmstudio", "strata"}:
+            raise ValueError("LLM_PROVIDER must be lmstudio or strata when LLM_ENABLED is true")
+        if (
+            self.llm_enabled
+            and self.llm_provider == "lmstudio"
+            and (not self.lm_studio_host.strip() or ":" not in self.lm_studio_host)
         ):
             raise ValueError("LM_STUDIO_HOST must use host:port syntax")
+        if (
+            self.llm_enabled
+            and self.llm_provider == "strata"
+            and not _is_http_base_url(self.strata_base_url)
+        ):
+            raise ValueError(
+                "STRATA_BASE_URL must be an http(s) URL without credentials, query or fragment"
+            )
         if not 1000 <= self.lm_studio_chunk_chars <= 100_000:
             raise ValueError("LM_STUDIO_CHUNK_CHARS must be between 1000 and 100000")
         if not 256 <= self.lm_studio_max_tokens <= 32768:
             raise ValueError("LM_STUDIO_MAX_TOKENS must be between 256 and 32768")
+        if not 1000 <= self.strata_chunk_chars <= 100_000:
+            raise ValueError("STRATA_CHUNK_CHARS must be between 1000 and 100000")
+        if not 256 <= self.strata_max_tokens <= 32768:
+            raise ValueError("STRATA_MAX_TOKENS must be between 256 and 32768")
         return self
+
+
+def _is_http_base_url(value: str) -> bool:
+    """Whether ``value`` is an http(s) server root that carries no credentials.
+
+    The worker repeats this check when it builds the Strata client; it is not
+    shared because configuration must not import the processing package.
+    """
+
+    try:
+        parsed = urlsplit(value.strip())
+        port_is_valid = parsed.port is None or parsed.port > 0
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and port_is_valid
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 @lru_cache

@@ -401,7 +401,7 @@ describe("recording transcript states", () => {
     await browser.click(screen.getByRole("tab", { name: "分析" }));
 
     expect(await screen.findByRole("heading", { name: "分析仍在準備中" })).toBeInTheDocument();
-    expect(screen.getByText("LM Studio 正喺背景分析，完成之後會自動顯示。")).toBeInTheDocument();
+    expect(screen.getByText("LLM 正喺背景分析，完成之後會自動顯示。")).toBeInTheDocument();
   });
 
   it("does not promise an analysis that automatic analysis is not bringing", async () => {
@@ -698,6 +698,33 @@ describe("recording transcript states", () => {
     await waitFor(() => expect(play).toHaveBeenCalledOnce());
     expect((audio as HTMLAudioElement).currentTime).toBe(5);
     expect(screen.getByRole("button", { name: /停止.*一旦こちら/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["lmstudio", "LM Studio"],
+    ["strata", "Strata"],
+    ["manual", "LLM"],
+  ])("labels an analysis from %s as %s", async (provider, label) => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    const base = mockDetailApi(
+      jsonResponse({ recording_id: recordingId, status: "completed", text: "", segments: [] }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+        String(input).endsWith("/analysis")
+          ? Promise.resolve(jsonResponse({ ...completedAnalysis, provider }))
+          : base(input, init),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "分析" }));
+
+    expect(await screen.findByRole("heading", { name: "內容摘要" })).toBeInTheDocument();
+    expect(document.querySelector(".analysis-toolbar .panel-kicker")?.textContent).toBe(label);
   });
 
   it("saves an analysis expression as a bookmark and reflects the saved state", async () => {

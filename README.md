@@ -258,12 +258,17 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `PYANNOTE_METRICS_ENABLED` | `0` | Disables pyannote telemetry in the supplied runtime. |
 | `HF_HOME` / `TORCH_HOME` | cache paths | Persistent model-cache roots. |
 | `LLM_ENABLED` | `false` | Optional analysis switch; transcription does not depend on it. |
-| `LLM_PROVIDER` | `disabled` | Set `lmstudio` together with `LLM_ENABLED=true`. |
+| `LLM_PROVIDER` | `disabled` | Set `lmstudio` or `strata` together with `LLM_ENABLED=true`; only the selected server's settings are used. |
 | `LM_STUDIO_HOST` | `127.0.0.1:1234` | LM Studio SDK server as `host:port`; from Docker use the 5090 host's trusted-LAN address. |
 | `LM_STUDIO_API_KEY` | empty | Optional LM Studio API token injected only into the worker. |
 | `LM_STUDIO_TIMEOUT_SECONDS` | `600` | Inference inactivity timeout. |
 | `LM_STUDIO_CHUNK_CHARS` | `12000` | Maximum transcript characters per map-analysis chunk. |
 | `LM_STUDIO_MAX_TOKENS` | `4096` | Structured output token cap for every map/reduce layer. |
+| `STRATA_BASE_URL` | `http://127.0.0.1:47831` | Strata server root without `/v1`; Compose defaults to `http://host.docker.internal:47831`. |
+| `STRATA_API_KEY` | empty | Strata API key from its Serving settings, injected only into the worker. |
+| `STRATA_TIMEOUT_SECONDS` | `600` | Inactivity timeout; Strata's keep-alives keep a long reply within it. |
+| `STRATA_CHUNK_CHARS` | `12000` | Maximum transcript characters per map-analysis chunk. |
+| `STRATA_MAX_TOKENS` | `4096` | Output token cap per request, including a reasoning model's reasoning. |
 | `AUDIO_RETENTION_DAYS` / `TRANSCRIPT_RETENTION_DAYS` | blank/unset | Optional positive policy values; the MVP has no automatic cleanup worker. |
 
 The Compose-only variables `POSTGRES_DB`, `POSTGRES_USER`,
@@ -899,12 +904,51 @@ timestamps and speaker labels. Logs never contain
 prompts, transcripts, responses, or token content.
 
 The original audio and normalized WAV always remain on this audio server. Only
-transcript text crosses the trusted LAN to LM Studio. A 5090 accelerates this
+transcript text crosses the trusted LAN to LM Studio or Strata. A 5090 accelerates this
 LLM analysis; it does not accelerate faster-whisper unless the worker itself is
 separately rebuilt/configured for that GPU. The analysis-only endpoint reads
 the transcript from PostgreSQL and never touches audio, Whisper, or pyannote.
 Sentence playback streams audio only from this server to the authenticated
-browser; it never sends audio to LM Studio.
+browser; it never sends audio to LM Studio or Strata.
+
+### Strata
+
+Strata can serve the same analysis, translation, and day summaries instead of
+LM Studio. Select it with `LLM_PROVIDER`; the `LM_STUDIO_*` values are then
+ignored, and switching back is a matter of setting `lmstudio` again:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=strata
+STRATA_BASE_URL=http://host.docker.internal:47831
+STRATA_API_KEY=replace-with-strata-api-key
+STRATA_TIMEOUT_SECONDS=600
+STRATA_CHUNK_CHARS=12000
+STRATA_MAX_TOKENS=4096
+```
+
+`STRATA_BASE_URL` is the server root without `/v1`: `http://127.0.0.1:47831`
+for a native worker, `http://host.docker.internal:47831` from Docker Desktop,
+since a container's loopback is not the host's. Take `STRATA_API_KEY` from
+Strata's Serving settings. The worker talks to Strata's OpenAI-compatible API
+with the standard library only, so it adds no dependency, never goes through
+an HTTP proxy, and never follows a redirect that would carry the key elsewhere.
+
+Load exactly one model with Strata's native engine, which forwards the
+JSON-schema `response_format` unchanged. The worker reads `GET /v1/models`,
+which lists only loaded models, and sends the identifier Strata reported back
+with each request to `/v1/chat/completions`; it never names, loads, or
+downloads a model itself, and zero or several loaded models fail visibly as
+they do with LM Studio. Replies are streamed. Strata sends keep-alive comments
+while it works, so `STRATA_TIMEOUT_SECONDS` limits silence, not the length of
+a reply, which matters on a slow machine. A reasoning model spends part of
+`STRATA_MAX_TOKENS` on its reasoning; Strata returns that apart from the answer
+and the worker discards it. A reply cut off at the limit fails as
+`strata_output_truncated` instead of being stored.
+
+Results record `strata` as their provider, and failures use `strata_*` codes
+in place of the `lmstudio_*` ones. A rejected key is a configuration failure,
+a busy or unreachable server is retried, and a rejected request is not.
 
 ## Database migrations
 

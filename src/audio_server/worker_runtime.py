@@ -34,6 +34,7 @@ from audio_server.processing.analysis import (
     DisabledAnalysisProvider,
     DisabledDailySummaryProvider,
     DisabledTranslationProvider,
+    LLMSettings,
     LMStudioAnalysisProvider,
     LMStudioSettings,
 )
@@ -60,6 +61,7 @@ from audio_server.processing.diarization import (
 from audio_server.processing.errors import PermanentProcessingError, ProviderConfigurationError
 from audio_server.processing.pipeline import ProcessingPipeline
 from audio_server.processing.sentences import TranscriptSentence, group_sentences
+from audio_server.processing.strata import StrataSettings
 from audio_server.processing.transcription import FasterWhisperProvider, FasterWhisperSettings
 from audio_server.processing.translation import LMStudioTranslationProvider
 from audio_server.services.daily_service import DailyService
@@ -723,58 +725,59 @@ def _build_pipeline(settings: Settings) -> ProcessingPipeline:
     )
 
 
-def _build_translation_provider(settings: Settings) -> TranslationProvider:
-    if not settings.llm_enabled:
-        return DisabledTranslationProvider()
-    if settings.llm_provider != "lmstudio":
-        raise ProviderConfigurationError(
-            code="translation_provider_invalid",
-            safe_message="The configured LLM translation provider is unsupported.",
-        )
-    return LMStudioTranslationProvider(
-        LMStudioSettings(
+def _llm_settings(settings: Settings) -> LLMSettings | None:
+    """The server ``LLM_PROVIDER`` selects, or None when it names no supported one."""
+
+    if settings.llm_provider == "lmstudio":
+        return LMStudioSettings(
             host=settings.lm_studio_host,
             api_key=settings.lm_studio_api_key.get_secret_value(),
             timeout_seconds=settings.lm_studio_timeout_seconds,
             chunk_chars=settings.lm_studio_chunk_chars,
             max_tokens=settings.lm_studio_max_tokens,
         )
-    )
+    if settings.llm_provider == "strata":
+        return StrataSettings(
+            base_url=settings.strata_base_url,
+            api_key=settings.strata_api_key.get_secret_value(),
+            timeout_seconds=settings.strata_timeout_seconds,
+            chunk_chars=settings.strata_chunk_chars,
+            max_tokens=settings.strata_max_tokens,
+        )
+    return None
+
+
+def _build_translation_provider(settings: Settings) -> TranslationProvider:
+    if not settings.llm_enabled:
+        return DisabledTranslationProvider()
+    llm = _llm_settings(settings)
+    if llm is None:
+        raise ProviderConfigurationError(
+            code="translation_provider_invalid",
+            safe_message="The configured LLM translation provider is unsupported.",
+        )
+    return LMStudioTranslationProvider(llm)
 
 
 def _build_daily_summary_provider(settings: Settings) -> DailySummaryProvider:
     if not settings.llm_enabled:
         return DisabledDailySummaryProvider()
-    if settings.llm_provider != "lmstudio":
+    llm = _llm_settings(settings)
+    if llm is None:
         raise ProviderConfigurationError(
             code="daily_summary_provider_invalid",
             safe_message="The configured LLM day summary provider is unsupported.",
         )
-    return LMStudioDailySummaryProvider(
-        LMStudioSettings(
-            host=settings.lm_studio_host,
-            api_key=settings.lm_studio_api_key.get_secret_value(),
-            timeout_seconds=settings.lm_studio_timeout_seconds,
-            chunk_chars=settings.lm_studio_chunk_chars,
-            max_tokens=settings.lm_studio_max_tokens,
-        )
-    )
+    return LMStudioDailySummaryProvider(llm)
 
 
 def _build_analysis_provider(settings: Settings) -> AnalysisProvider:
     if not settings.llm_enabled:
         return DisabledAnalysisProvider()
-    if settings.llm_provider != "lmstudio":
+    llm = _llm_settings(settings)
+    if llm is None:
         raise ProviderConfigurationError(
             code="analysis_provider_invalid",
             safe_message="The configured LLM analysis provider is unsupported.",
         )
-    return LMStudioAnalysisProvider(
-        LMStudioSettings(
-            host=settings.lm_studio_host,
-            api_key=settings.lm_studio_api_key.get_secret_value(),
-            timeout_seconds=settings.lm_studio_timeout_seconds,
-            chunk_chars=settings.lm_studio_chunk_chars,
-            max_tokens=settings.lm_studio_max_tokens,
-        )
-    )
+    return LMStudioAnalysisProvider(llm)

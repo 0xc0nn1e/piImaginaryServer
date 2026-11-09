@@ -1,4 +1,4 @@
-"""Sentence-level Cantonese translation through the same LM Studio client.
+"""Sentence-level Cantonese translation through the same LLM client as analysis.
 
 Only the transcript text ever leaves this process. Audio never does.
 """
@@ -12,10 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from audio_server.processing.analysis import (
     ClientFactory,
-    LMStudioSettings,
+    LLMSettings,
     _LoadedModel,
-    _sdk_client,
-    classify_lmstudio_failure,
+    _open_client,
+    classify_llm_failure,
     require_single_loaded_model,
     structured_payload,
 )
@@ -60,16 +60,16 @@ class LMStudioTranslationProvider:
 
     def __init__(
         self,
-        settings: LMStudioSettings,
+        settings: LLMSettings,
         *,
         client_factory: ClientFactory | None = None,
     ) -> None:
         self._settings = settings
-        self._client_factory = client_factory or _sdk_client
+        self._client_factory = client_factory or _open_client
 
     @property
     def name(self) -> str:
-        return "lmstudio"
+        return self._settings.provider_name
 
     def translate(
         self,
@@ -83,7 +83,7 @@ class LMStudioTranslationProvider:
 
         try:
             with self._client_factory(self._settings) as client:
-                model = require_single_loaded_model(client)
+                model = require_single_loaded_model(client, self._settings)
                 identifier = str(model.identifier)
                 translations = tuple(
                     SentenceTranslation(
@@ -103,13 +103,17 @@ class LMStudioTranslationProvider:
         except ProcessingError:
             raise
         except Exception as exc:
-            raise classify_lmstudio_failure(
+            raise classify_llm_failure(
                 exc,
-                permanent_code="lmstudio_translation_failed",
-                permanent_message="LM Studio could not produce a valid translation.",
+                self._settings,
+                permanent_code=f"{self._settings.provider_name}_translation_failed",
+                permanent_message=(
+                    f"{self._settings.provider_label} could not produce a valid translation."
+                ),
             ) from exc
 
     def _render(self, model: _LoadedModel, sentence: TranscriptSentence) -> str:
+        server, label = self._settings.provider_name, self._settings.provider_label
         try:
             response = model.respond(
                 _translate_prompt(sentence),
@@ -121,12 +125,12 @@ class LMStudioTranslationProvider:
             # Field paths and rule names only; the rejected value is model
             # output and must never reach the log.
             logger.warning(
-                "LM Studio translation failed schema validation",
-                extra={"violations": _safe_violations(exc)},
+                "LLM translation failed schema validation",
+                extra={"provider": server, "violations": _safe_violations(exc)},
             )
             raise PermanentProcessingError(
-                code="lmstudio_translation_schema_invalid",
-                safe_message="LM Studio returned an invalid translation.",
+                code=f"{server}_translation_schema_invalid",
+                safe_message=f"{label} returned an invalid translation.",
             ) from exc
         except (TypeError, ValueError) as exc:
             # Analysis and the day summary already name an unreadable response
@@ -134,8 +138,8 @@ class LMStudioTranslationProvider:
             # same fault under a different code, which is how one broken
             # response shape read as two unrelated failures.
             raise PermanentProcessingError(
-                code="lmstudio_translation_schema_invalid",
-                safe_message="LM Studio returned an invalid translation.",
+                code=f"{server}_translation_schema_invalid",
+                safe_message=f"{label} returned an invalid translation.",
             ) from exc
 
 

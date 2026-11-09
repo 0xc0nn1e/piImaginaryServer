@@ -1,4 +1,4 @@
-"""Day-level summary of already-analysed recordings, through LM Studio.
+"""Day-level summary of already-analysed recordings, through the configured LLM.
 
 The day summary reads committed analyses only. It never opens audio and never
 re-reads a transcript, so a day can be summarised long after its recordings
@@ -15,10 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from audio_server.processing.analysis import (
     ClientFactory,
-    LMStudioSettings,
+    LLMSettings,
     _LoadedModel,
-    _sdk_client,
-    classify_lmstudio_failure,
+    _open_client,
+    classify_llm_failure,
     require_single_loaded_model,
     structured_payload,
 )
@@ -111,16 +111,16 @@ class LMStudioDailySummaryProvider:
 
     def __init__(
         self,
-        settings: LMStudioSettings,
+        settings: LLMSettings,
         *,
         client_factory: ClientFactory | None = None,
     ) -> None:
         self._settings = settings
-        self._client_factory = client_factory or _sdk_client
+        self._client_factory = client_factory or _open_client
 
     @property
     def name(self) -> str:
-        return "lmstudio"
+        return self._settings.provider_name
 
     def summarize(
         self,
@@ -134,9 +134,10 @@ class LMStudioDailySummaryProvider:
                 schema_version=SCHEMA_VERSION,
             )
 
+        server, label = self._settings.provider_name, self._settings.provider_label
         try:
             with self._client_factory(self._settings) as client:
-                model = require_single_loaded_model(client)
+                model = require_single_loaded_model(client, self._settings)
                 identifier = str(model.identifier)
                 drafts = [
                     self._respond(model, _map_prompt(summary_date, chunk))
@@ -153,7 +154,7 @@ class LMStudioDailySummaryProvider:
                 # that converges on the final permitted pass has succeeded.
                 if len(drafts) != 1:
                     raise PermanentProcessingError(
-                        code="lmstudio_daily_summary_not_converging",
+                        code=f"{server}_daily_summary_not_converging",
                         safe_message="The day summary could not be reduced to one result.",
                     )
                 return AnalysisResult(
@@ -166,13 +167,15 @@ class LMStudioDailySummaryProvider:
         except ProcessingError:
             raise
         except Exception as exc:
-            raise classify_lmstudio_failure(
+            raise classify_llm_failure(
                 exc,
-                permanent_code="lmstudio_daily_summary_failed",
-                permanent_message="LM Studio could not produce a valid day summary.",
+                self._settings,
+                permanent_code=f"{server}_daily_summary_failed",
+                permanent_message=f"{label} could not produce a valid day summary.",
             ) from exc
 
     def _respond(self, model: _LoadedModel, prompt: str) -> _DailyDraft:
+        server, label = self._settings.provider_name, self._settings.provider_label
         try:
             response = model.respond(
                 prompt,
@@ -184,17 +187,17 @@ class LMStudioDailySummaryProvider:
             # Field paths and rule names only. The rejected values are model
             # output and must never reach the log.
             logger.warning(
-                "LM Studio day summary failed schema validation",
-                extra={"violations": _safe_violations(exc)},
+                "LLM day summary failed schema validation",
+                extra={"provider": server, "violations": _safe_violations(exc)},
             )
             raise PermanentProcessingError(
-                code="lmstudio_daily_summary_schema_invalid",
-                safe_message="LM Studio returned an invalid day summary.",
+                code=f"{server}_daily_summary_schema_invalid",
+                safe_message=f"{label} returned an invalid day summary.",
             ) from exc
         except (TypeError, ValueError) as exc:
             raise PermanentProcessingError(
-                code="lmstudio_daily_summary_schema_invalid",
-                safe_message="LM Studio returned an invalid day summary.",
+                code=f"{server}_daily_summary_schema_invalid",
+                safe_message=f"{label} returned an invalid day summary.",
             ) from exc
 
 

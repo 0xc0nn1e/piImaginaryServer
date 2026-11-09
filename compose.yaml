@@ -157,6 +157,13 @@ services:
       LM_STUDIO_TIMEOUT_SECONDS: ${LM_STUDIO_TIMEOUT_SECONDS:-600}
       LM_STUDIO_CHUNK_CHARS: ${LM_STUDIO_CHUNK_CHARS:-12000}
       LM_STUDIO_MAX_TOKENS: ${LM_STUDIO_MAX_TOKENS:-4096}
+      # A container's loopback is not the host's, so the default reaches a
+      # Strata server on the Docker Desktop host.
+      STRATA_BASE_URL: ${STRATA_BASE_URL:-http://host.docker.internal:47831}
+      STRATA_API_KEY: ${STRATA_API_KEY:-}
+      STRATA_TIMEOUT_SECONDS: ${STRATA_TIMEOUT_SECONDS:-600}
+      STRATA_CHUNK_CHARS: ${STRATA_CHUNK_CHARS:-12000}
+      STRATA_MAX_TOKENS: ${STRATA_MAX_TOKENS:-4096}
     depends_on:
       postgres:
         condition: service_healthy
@@ -169,9 +176,9 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
-  # Analysis is a network call to LM Studio, so it must not queue behind hours
-  # of CPU-bound transcription. This worker claims analysis jobs only and never
-  # loads Whisper or pyannote, so it stays small.
+  # Analysis is a network call to LM Studio or Strata, so it must not queue
+  # behind hours of CPU-bound transcription. This worker claims analysis jobs
+  # only and never loads Whisper or pyannote, so it stays small.
   analysis-worker:
     build:
       context: .
@@ -197,6 +204,13 @@ services:
       LM_STUDIO_TIMEOUT_SECONDS: ${LM_STUDIO_TIMEOUT_SECONDS:-600}
       LM_STUDIO_CHUNK_CHARS: ${LM_STUDIO_CHUNK_CHARS:-12000}
       LM_STUDIO_MAX_TOKENS: ${LM_STUDIO_MAX_TOKENS:-4096}
+      # A container's loopback is not the host's, so the default reaches a
+      # Strata server on the Docker Desktop host.
+      STRATA_BASE_URL: ${STRATA_BASE_URL:-http://host.docker.internal:47831}
+      STRATA_API_KEY: ${STRATA_API_KEY:-}
+      STRATA_TIMEOUT_SECONDS: ${STRATA_TIMEOUT_SECONDS:-600}
+      STRATA_CHUNK_CHARS: ${STRATA_CHUNK_CHARS:-12000}
+      STRATA_MAX_TOKENS: ${STRATA_MAX_TOKENS:-4096}
     depends_on:
       postgres:
         condition: service_healthy
