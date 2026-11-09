@@ -1524,3 +1524,99 @@ describe("marking a recording reviewed from its own page", () => {
     expect(screen.getByRole("checkbox", { name: "已檢查" })).toBeChecked();
   });
 });
+
+describe("iPhone captions tab", () => {
+  const emptyTranscript = { recording_id: recordingId, status: "completed", text: "", segments: [] };
+
+  /** The detail API plus a captions answer, built fresh for every request. */
+  function mockWithCaptions(captions: () => Response) {
+    const base = mockDetailApi(jsonResponse(emptyTranscript));
+    return vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === `/api/v1/recordings/${recordingId}/captions`) {
+        return Promise.resolve(captions());
+      }
+      return base(input, init);
+    });
+  }
+
+  it("lists the phone's captions with readings and a way to hear each line", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal(
+      "fetch",
+      mockWithCaptions(() =>
+        jsonResponse({
+          recording_id: recordingId,
+          locale: "ja-JP",
+          updated_at: "2026-08-10T00:03:00Z",
+          lines: [
+            { sequence: 0, start_time: 0.2, end_time: 2, text: "一旦持ち帰ります。" },
+            { sequence: 1, start_time: 4.5, end_time: 6, text: "来週までにお願いします" },
+          ],
+          furigana: {
+            "一旦持ち帰ります。": [
+              { text: "一旦", reading: "いったん" },
+              { text: "持ち帰ります。", reading: null },
+            ],
+          },
+        }),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "iPhone 字幕" }));
+
+    expect(await screen.findByRole("heading", { name: "iPhone 即時字幕" })).toBeInTheDocument();
+    expect(screen.getByText("辨識語言：ja-JP")).toBeInTheDocument();
+    expect(screen.getByText("いったん")).toBeInTheDocument();
+    expect(screen.getByText("来週までにお願いします")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "播放原音 来週までにお願いします" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says plainly when a recording came without captions", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal(
+      "fetch",
+      mockWithCaptions(() =>
+        jsonResponse({
+          recording_id: recordingId,
+          locale: null,
+          updated_at: null,
+          lines: [],
+          furigana: {},
+        }),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "iPhone 字幕" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "這段錄音沒有 iPhone 字幕" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/辨識語言/)).not.toBeInTheDocument();
+  });
+
+  it("reports captions it could not read instead of showing none", async () => {
+    window.history.replaceState({}, "", `/recordings/${recordingId}`);
+    vi.stubGlobal(
+      "fetch",
+      mockWithCaptions(() =>
+        jsonResponse({ error: { code: "internal_server_error", message: "boom" } }, 500),
+      ),
+    );
+    const browser = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "meeting.flac" });
+    await browser.click(screen.getByRole("tab", { name: "iPhone 字幕" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("未能讀取字幕，請稍後再試。");
+    expect(screen.queryByText("這段錄音沒有 iPhone 字幕")).not.toBeInTheDocument();
+  });
+});

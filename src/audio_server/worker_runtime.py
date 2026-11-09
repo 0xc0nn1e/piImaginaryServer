@@ -18,6 +18,7 @@ from audio_server.db.models import (
     AnalysisStatus,
     JobKind,
     Recording,
+    RecordingCaptions,
     TranscriptSegment,
     TranscriptTranslation,
     TranslationSource,
@@ -42,6 +43,7 @@ from audio_server.processing.audio import AudioProcessor, FFmpegSettings
 from audio_server.processing.contracts import (
     AnalysisProvider,
     AnalysisResult,
+    CaptionLine,
     DailySummaryProvider,
     DiarizationProvider,
     MergedTranscriptSegment,
@@ -227,10 +229,25 @@ class PipelineJobProcessor:
             )
         return _daily_summary_persister(service, day, result, revisions)
 
+    def _load_captions(self, claim: ClaimedJob) -> tuple[CaptionLine, ...]:
+        """Read the recorder's live captions; most recorders never send any."""
+
+        recording_id = _recording_scope(claim)
+        with self._session_factory() as session:
+            captions = session.scalar(
+                select(RecordingCaptions).where(RecordingCaptions.recording_id == recording_id)
+            )
+            lines = list(captions.lines) if captions is not None else []
+        return tuple(
+            CaptionLine(start=float(line["start"]), end=float(line["end"]), text=str(line["text"]))
+            for line in lines
+        )
+
     def _process_analysis(self, claim: ClaimedJob) -> ResultPersister:
         recording_id = _recording_scope(claim)
         transcript = self._load_transcript(claim)
-        result = self._analysis_provider.analyze(str(recording_id), transcript)
+        captions = self._load_captions(claim)
+        result = self._analysis_provider.analyze(str(recording_id), transcript, captions)
         if result.status is PipelineAnalysisStatus.FAILED:
             raise PermanentProcessingError(
                 code=result.error_code or "analysis_failed",

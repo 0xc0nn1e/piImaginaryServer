@@ -8,6 +8,7 @@ import {
   deleteRecording,
   getActivity,
   getAnalysis,
+  getCaptions,
   getReanalysis,
   getRecording,
   getRecordingNeighbours,
@@ -42,6 +43,7 @@ import type {
   AnalysisResponse,
   AnalysisResultV2,
   Bookmark,
+  CaptionsResponse,
   FuriganaMap,
   BookmarkKind,
   RecordingNeighboursResponse,
@@ -50,7 +52,17 @@ import type {
   TranscriptResponse,
 } from "../types";
 
-type DetailTab = "overview" | "activity" | "transcript" | "translations" | "analysis";
+type DetailTab =
+  | "overview"
+  | "activity"
+  | "transcript"
+  | "captions"
+  | "translations"
+  | "analysis";
+type CaptionsState =
+  | { kind: "idle" | "loading" }
+  | { kind: "ready"; data: CaptionsResponse }
+  | { kind: "error"; message: string };
 type TranscriptState =
   | { kind: "idle" | "loading" | "pending" }
   | { kind: "ready"; data: TranscriptResponse }
@@ -104,6 +116,7 @@ export function RecordingDetailPage() {
   const [status, setStatus] = useState<RecordingStatusResponse | null>(null);
   const [activity, setActivity] = useState<ActivityResponse | null>(null);
   const [transcript, setTranscript] = useState<TranscriptState>({ kind: "idle" });
+  const [captions, setCaptions] = useState<CaptionsState>({ kind: "idle" });
   const [analysis, setAnalysis] = useState<AnalysisState>({ kind: "idle" });
   const [transcriptDraft, setTranscriptDraft] = useState<TranscriptResponse | null>(null);
   const [transcriptRefreshKey, setTranscriptRefreshKey] = useState(0);
@@ -418,6 +431,30 @@ export function RecordingDetailPage() {
   }, [id, invalidate, navigate, status?.status, t, tab, transcriptRefreshKey]);
 
   useEffect(() => {
+    if (tab !== "captions") return;
+    // The phone sends its captions only after the audio has been accepted, so
+    // they can appear while this page is open. Opening the tab asks again.
+    let cancelled = false;
+    setCaptions({ kind: "loading" });
+    void getCaptions(id)
+      .then((data) => {
+        if (!cancelled) setCaptions({ kind: "ready", data });
+      })
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        if (caught instanceof ApiError && caught.status === 401) {
+          invalidate();
+          navigate("/login", { replace: true });
+        } else {
+          setCaptions({ kind: "error", message: t("detail.captionsError") });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, invalidate, navigate, t, tab]);
+
+  useEffect(() => {
     analysisKind.current = analysis.kind;
   }, [analysis.kind]);
 
@@ -719,6 +756,7 @@ export function RecordingDetailPage() {
           ["overview", t("detail.tabOverview")],
           ["activity", t("detail.tabActivity")],
           ["transcript", t("detail.tabTranscript")],
+          ["captions", t("detail.tabCaptions")],
           ["translations", t("detail.tabTranslations")],
           ["analysis", t("detail.tabAnalysis")],
         ] as const).map(([value, label]) => (
@@ -836,6 +874,31 @@ export function RecordingDetailPage() {
               onClick={() => neighbours?.next_id && navigate(`/recordings/${neighbours.next_id}`)}
             >{t("detail.nextRecording")}</button>
           </nav>
+        </section>
+      ) : null}
+
+      {tab === "captions" ? (
+        <section aria-labelledby="tab-captions" className="tab-panel panel transcript-panel" id="panel-captions" role="tabpanel">
+          <div className="panel-heading-row">
+            <div><p className="panel-kicker">{t("detail.captionsKicker")}</p><h2>{t("detail.captionsTitle")}</h2></div>
+            {captions.kind === "ready" && captions.data.locale ? <span className="muted">{t("detail.captionsLanguage", { locale: captions.data.locale })}</span> : null}
+          </div>
+          {captions.kind === "loading" || captions.kind === "idle" ? <LoadingView label={t("detail.captionsLoading")} /> : null}
+          {captions.kind === "error" ? <div className="notice notice-error" role="alert">{captions.message}</div> : null}
+          {captions.kind === "ready" && captions.data.lines.length === 0 ? <div className="empty-state compact-empty"><h3>{t("detail.noCaptions")}</h3><p>{t("detail.noCaptionsDescription")}</p></div> : null}
+          {captions.kind === "ready" && captions.data.lines.length ? <>
+            <p className="muted">{t("detail.captionsNote")}</p>
+            <ol className="transcript-list">
+              {captions.data.lines.map((line) => {
+                const clipKey = `caption-${line.sequence}`;
+                const playing = playingClip === clipKey;
+                return <li key={line.sequence}>
+                  <div className="segment-meta"><time>{formatTimestamp(line.start_time)}</time><button aria-label={`${playing ? t("analysis.stop") : t("analysis.play")} ${line.text}`} className={`clip-button ${playing ? "is-playing" : ""}`} type="button" onClick={() => void playClip(clipKey, line.start_time, line.end_time)}><span aria-hidden="true">{playing ? "■" : "▶"}</span>{playing ? t("analysis.stop") : t("analysis.play")}</button></div>
+                  <div className="segment-body"><p><Furigana text={line.text} readings={captions.data.furigana} /></p></div>
+                </li>;
+              })}
+            </ol>
+          </> : null}
         </section>
       ) : null}
 

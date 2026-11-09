@@ -159,6 +159,9 @@ class Recording(Base):
     analyses: Mapped[list[Analysis]] = relationship(
         back_populates="recording", cascade="all, delete-orphan"
     )
+    captions: Mapped[RecordingCaptions | None] = relationship(
+        back_populates="recording", cascade="all, delete-orphan"
+    )
 
 
 class ProcessingJob(Base):
@@ -313,6 +316,39 @@ class TranscriptSegment(Base):
 
     recording: Mapped[Recording] = relationship(back_populates="transcript_segments")
     job: Mapped[ProcessingJob] = relationship(back_populates="transcript_segments")
+
+
+class RecordingCaptions(Base):
+    """The live captions a recorder transcribed on the device while recording.
+
+    An iPhone captions speech as it records, with a different model and from
+    audio that was never compressed, so its reading goes wrong in different
+    places from Whisper's. It is kept beside the transcript and never merged
+    into it: the analysis reads both, but quotes only the transcript, whose
+    segments carry the speakers and timings everything else is keyed to.
+    """
+
+    __tablename__ = "recording_captions"
+    __table_args__ = (UniqueConstraint("recording_id", name="uq_recording_captions_recording"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    recording_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("recordings.id", ondelete="CASCADE"), nullable=False
+    )
+    # The BCP 47 language the device listened for, such as ``ja-JP``.
+    locale: Mapped[str] = mapped_column(String(35), nullable=False)
+    # ``[{"start": seconds, "end": seconds, "text": str}, ...]`` in spoken
+    # order, timed from the start of the recording. Captions are only ever
+    # written and read whole, so they are one document rather than a row each.
+    lines: Mapped[list[dict[str, Any]]] = mapped_column(json_type, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    recording: Mapped[Recording] = relationship(back_populates="captions")
 
 
 class TranslationSource(enum.StrEnum):

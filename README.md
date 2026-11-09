@@ -471,6 +471,63 @@ server reports correct status codes rather than acknowledging invalid data.
 Until the separate client repository classifies permanent failures, operators
 must inspect and quarantine repeatedly rejected client items.
 
+## iPhone live captions
+
+The iPhone recorder can caption speech on the phone while it records. It sends
+those captions in a request of their own once the audio has been accepted,
+because the last words of a chunk are only finished after the chunk closes:
+
+```http
+PUT /api/v1/recordings/{id}/captions
+Authorization: Bearer <API_TOKEN>
+X-Device-ID: <the device_id the audio was uploaded with>
+Content-Type: application/json
+```
+
+```json
+{
+  "locale": "ja-JP",
+  "lines": [
+    {"start": 0.2, "end": 2.0, "text": "一旦持ち帰ります。"}
+  ]
+}
+```
+
+- `start` and `end` are seconds from the start of the recording. Neither may be
+  negative, and `end` may equal `start` but never precede it.
+- The request replaces every caption the recording held. Lines are stored in
+  spoken order, whatever order they arrive in.
+- Only the machine credential is accepted, and `X-Device-ID` must name the
+  device that uploaded the audio; anything else is `409
+  captions_device_mismatch`. An unknown recording is `404`, and malformed
+  lines are `422`.
+- Sending the same captions again changes nothing, so a retry after a lost
+  response is safe.
+- The response's `analysis_queued` says whether these captions asked for a
+  fresh analysis.
+
+Captions are kept beside the Whisper transcript and never merged into it. The
+analysis reads both, interleaved by time, and is told where each goes wrong:
+Whisper carries the speakers but can invent words over silence and force other
+languages into Japanese, while the phone recognises one language only, has no
+speakers, and can miss lines. Quoted natural expressions and highlights are
+still taken from the transcript alone, because only its segments carry the
+speakers and timings the rest of the system is keyed to. Day summaries are
+written from analyses, so they gain from the captions without change.
+
+Captions normally arrive while the recording is still being transcribed, and
+the analysis that transcription chains reads them. Captions that arrive after
+an analysis was written mark it stale, exactly as a transcript edit does, and
+queue a fresh analysis when automatic analysis is on and no other job holds the
+recording. If another job holds it, or automatic analysis is off, the analysis
+stays marked stale until it is queued again from the recording page. An
+analysis already running when captions arrive has read its inputs; queue it
+again to include them.
+
+The recording page shows the captions on a tab of their own, **iPhone 字幕**,
+with Japanese readings and a button to hear each line. Captions are deleted
+with their recording and, like transcripts, never logged.
+
 ## API endpoints
 
 | Method | Path | Behavior |
@@ -494,6 +551,8 @@ must inspect and quarantine repeatedly rejected client items.
 | `GET` | `/api/v1/recordings/{id}/activity` | Paginated, privacy-safe processing activity. |
 | `GET` | `/api/v1/recordings/{id}/transcript` | Ordered timestamped segments and formatted transcript. |
 | `PUT` | `/api/v1/recordings/{id}/transcript` | Replace all segments using an expected revision. |
+| `PUT` | `/api/v1/recordings/{id}/captions` | Replace the recorder's live captions; machine Bearer and the recording's `X-Device-ID` only. |
+| `GET` | `/api/v1/recordings/{id}/captions` | The recorder's live captions in spoken order; empty when it sent none. |
 | `POST` | `/api/v1/recordings/{id}/retry` | Create a new job for a terminal failed recording. |
 | `POST` | `/api/v1/recordings/{id}/reprocess` | Re-run a completed/failed recording; browser calls require Origin and CSRF. |
 | `DELETE` | `/api/v1/recordings/{id}` | Permanently delete a terminal recording and its private data. |
@@ -580,7 +639,8 @@ browser routes include:
 - `/login`: administrator sign-in
 - `/recordings`: paginated/filterable list and sequential multi-file MP3/WAV/M4A upload
 - `/recordings/{id}`: metadata, current stage, safe activity, editable transcript,
-  bilingual analysis, separate retranscription/reanalysis, and permanent deletion
+  the iPhone's live captions, bilingual analysis, separate
+  retranscription/reanalysis, and permanent deletion
 - `/bookmarks`: saved natural expressions and highlights, filterable by kind, each
   linking back to its recording while that recording still exists
 - `/settings`: system-wide switches for whether analysis and the Cantonese
@@ -973,6 +1033,10 @@ Revision `0012_processing_settings` seeds its single row with both automatic
 LLM steps switched on, so upgrading changes nothing until an administrator
 turns one off. Rolling it back drops that choice; older code always queues both.
 
+Revision `0013_recording_captions` adds the table that holds iPhone live
+captions. Rolling it back deletes every stored caption; analyses already
+written from them stay as they are.
+
 Compose uses one PostgreSQL login for migrations and runtime access to keep the
 MVP easy to operate. A hardened production deployment should split the schema
 owner/migration role from a restricted API/worker runtime role and grant only
@@ -1005,7 +1069,7 @@ integration tests should use an isolated disposable database.
 ## Security and privacy
 
 This service stores workplace conversations. Treat recordings, transcript
-segments, metadata, and analyses as private data.
+segments, device captions, metadata, and analyses as private data.
 
 - Terminate HTTPS at a trusted reverse proxy or load balancer.
 - Set `WEB_COOKIE_SECURE=true` and `WEB_ALLOWED_ORIGIN` to the exact public
@@ -1019,8 +1083,8 @@ segments, metadata, and analyses as private data.
 - Keep `.env`, original/derived audio, database files, logs, and model caches
   out of Git and backups with unsuitable access controls.
 - Restrict permissions on storage and database backups.
-- Never log Authorization headers, tokens, audio, full transcripts, raw client
-  metadata, or unsanitized ffmpeg/provider errors.
+- Never log Authorization headers, tokens, audio, full transcripts, captions,
+  raw client metadata, or unsanitized ffmpeg/provider errors.
 - Preserve the original filename only as metadata; never interpret it as a
   filesystem path.
 - Keep upload limits, checksum validation, ffprobe validation, parameterized

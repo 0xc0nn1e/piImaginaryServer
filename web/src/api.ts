@@ -6,6 +6,7 @@ import type {
   BookmarkCreateRequest,
   BookmarkKind,
   BookmarkListResponse,
+  CaptionsResponse,
   DayAnalysisQueuedResponse,
   DayDetailResponse,
   DayListResponse,
@@ -225,6 +226,10 @@ export function getActivity(recordingId: string): Promise<ActivityResponse> {
 
 export function getTranscript(recordingId: string): Promise<TranscriptResponse> {
   return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/transcript`);
+}
+
+export function getCaptions(recordingId: string): Promise<CaptionsResponse> {
+  return request(`/api/v1/recordings/${encodeURIComponent(recordingId)}/captions`);
 }
 
 export function getAnalysis(recordingId: string): Promise<AnalysisResponse> {

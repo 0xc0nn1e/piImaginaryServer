@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from types import TracebackType
@@ -22,6 +22,7 @@ from audio_server.api.schemas import (
 from audio_server.processing.contracts import (
     AnalysisResult,
     AnalysisStatus,
+    CaptionLine,
     DailyRecordingDigest,
     MergedTranscriptSegment,
     TranslationResult,
@@ -46,8 +47,9 @@ class DisabledAnalysisProvider:
         self,
         recording_id: str,
         segments: Sequence[MergedTranscriptSegment],
+        captions: Sequence[CaptionLine] = (),
     ) -> AnalysisResult:
-        del recording_id, segments
+        del recording_id, segments, captions
         return AnalysisResult(
             status=AnalysisStatus.SKIPPED,
             provider=self.name,
@@ -285,9 +287,12 @@ class LMStudioAnalysisProvider:
         self,
         recording_id: str,
         segments: Sequence[MergedTranscriptSegment],
+        captions: Sequence[CaptionLine] = (),
     ) -> AnalysisResult:
         del recording_id
-        if not segments:
+        # Captions alone are still speech worth describing: Whisper can come
+        # back empty where the device heard someone. They just cannot be quoted.
+        if not segments and not captions:
             empty = AnalysisResultV2(
                 description=BilingualDescription(
                     ja="分析できる発話はありません。",
@@ -324,10 +329,18 @@ class LMStudioAnalysisProvider:
                     raise ProviderConfigurationError(code=code, safe_message=message)
                 model = loaded[0]
                 identifier = str(model.identifier)
-                drafts = [
-                    self._respond(model, _map_prompt(chunk))
-                    for chunk in chunk_transcript(segments, self._settings.chunk_chars)
-                ]
+                if captions:
+                    drafts = [
+                        self._respond(model, _map_prompt_with_captions(chunk))
+                        for chunk in chunk_transcript_with_captions(
+                            segments, captions, self._settings.chunk_chars
+                        )
+                    ]
+                else:
+                    drafts = [
+                        self._respond(model, _map_prompt(chunk))
+                        for chunk in chunk_transcript(segments, self._settings.chunk_chars)
+                    ]
                 while len(drafts) > 1:
                     drafts = [
                         self._respond(model, _reduce_prompt(group))
@@ -605,18 +618,54 @@ def chunk_transcript(
 ) -> tuple[str, ...]:
     """Split at segment boundaries, covering oversized segments in consecutive parts."""
 
+    return _pack_entries(
+        ((_segment_heading(segment), segment.text) for segment in segments), max_chars
+    )
+
+
+def chunk_transcript_with_captions(
+    segments: Sequence[MergedTranscriptSegment],
+    captions: Sequence[CaptionLine],
+    max_chars: int,
+) -> tuple[str, ...]:
+    """Interleave the transcript and the device's captions by time, then split.
+
+    Each chunk then holds both readings of the same stretch of conversation, so
+    the model can set one against the other line by line. A caption carries no
+    number, so it can never be mistaken for a segment a quote may cite. On a
+    tie the segment comes first, being the reading quotes are taken from.
+    """
+
+    timeline: list[tuple[float, int, int, str, str]] = [
+        (segment.start, 0, index, _segment_heading(segment), segment.text)
+        for index, segment in enumerate(segments)
+    ]
+    timeline.extend(
+        (caption.start, 1, index, f"CAPTION | {caption.start:.3f}s\n", caption.text)
+        for index, caption in enumerate(captions)
+    )
+    timeline.sort(key=lambda entry: entry[:3])
+    return _pack_entries(((heading, text) for *_, heading, text in timeline), max_chars)
+
+
+def _segment_heading(segment: MergedTranscriptSegment) -> str:
+    return f"SEGMENT {segment.sequence} | {segment.speaker_label} | {segment.start:.3f}s\n"
+
+
+def _pack_entries(entries: Iterable[tuple[str, str]], max_chars: int) -> tuple[str, ...]:
+    """Fill chunks with headed entries, splitting an oversized entry into parts."""
+
     if max_chars < 100:
         raise ValueError("max_chars is too small")
     chunks: list[str] = []
     current = ""
-    for segment in segments:
-        prefix = f"SEGMENT {segment.sequence} | {segment.speaker_label} | {segment.start:.3f}s\n"
-        room = max_chars - len(prefix) - 1
+    for heading, text in entries:
+        room = max_chars - len(heading) - 1
         if room <= 0:
             raise ValueError("max_chars cannot fit segment metadata")
-        parts = [segment.text[index : index + room] for index in range(0, len(segment.text), room)]
+        parts = [text[index : index + room] for index in range(0, len(text), room)]
         for part in parts or [""]:
-            rendered = f"{prefix}{part}\n"
+            rendered = f"{heading}{part}\n"
             if current and len(current) + len(rendered) > max_chars:
                 chunks.append(current.rstrip())
                 current = ""
@@ -638,6 +687,32 @@ def _map_prompt(transcript: str) -> str:
         "and use its sequence number. "
         "If no Japanese quote is available, return an empty corresponding array.\n\n"
         + transcript
+    )
+
+
+def _map_prompt_with_captions(conversation: str) -> str:
+    # The weaknesses are spelled out because they differ: each source is the
+    # better witness exactly where the other one is known to fail.
+    return (
+        "Analyze the Japanese conversation below. It is given as two independent machine "
+        "transcriptions of the same audio, interleaved by time. SEGMENT entries come from the "
+        "server: they carry speaker labels, but may contain words nobody said, especially over "
+        "silence, and may force speech in other languages into Japanese. CAPTION entries were "
+        "transcribed live on the recording iPhone in the one language it was set to: they have "
+        "no speakers, speech in any other language comes out garbled, and lines may be missing. "
+        "Use both to work out what was actually said; where they disagree, follow the reading the "
+        "context "
+        "supports, and leave out anything neither supports. "
+        "Return only the required structured response. "
+        "Write every field in both Japanese and natural Hong Kong Cantonese. Make description a "
+        "single concise sentence. Make summary a substantially more detailed 4-8 sentence account "
+        "covering context, main topics, conclusions, decisions, and follow-up actions actually "
+        "present in the conversation; do not invent missing details. Select at most 12 "
+        "tags, 20 useful natural expressions, and 12 highlights. For expressions/highlights, "
+        "copy original_ja exactly from the referenced SEGMENT, never from a CAPTION, without "
+        "adding quotation marks, and use its sequence number. "
+        "If no Japanese quote is available, return an empty corresponding array.\n\n"
+        + conversation
     )
 
 

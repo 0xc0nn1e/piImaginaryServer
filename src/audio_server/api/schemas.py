@@ -296,6 +296,72 @@ class TranscriptUpdateRequest(BaseModel):
     segments: list[TranscriptSegmentUpdate]
 
 
+class CaptionLineInput(BaseModel):
+    """One finished line of a device's live captions, timed from the recording's start."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    text: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("caption text cannot be blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def validate_interval(self) -> CaptionLineInput:
+        if not isfinite(self.start) or not isfinite(self.end):
+            raise ValueError("timestamps must be finite")
+        # A recognizer can report a single word as an instant, so an empty
+        # interval is accepted; only a reversed one is a client fault.
+        if self.end < self.start:
+            raise ValueError("end must not be before start")
+        return self
+
+
+class CaptionUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    locale: str = Field(
+        min_length=2, max_length=35, pattern=r"^[A-Za-z]{2,8}(?:[-_][A-Za-z0-9]{1,8})*$"
+    )
+    # Unbounded in length for the same reason as a transcript edit: one line
+    # per finished sentence, for as long as a recording runs. The body is
+    # capped by MAX_MUTATION_REQUEST_BYTES before it is parsed.
+    lines: list[CaptionLineInput]
+
+
+class CaptionUploadResponse(BaseModel):
+    recording_id: uuid.UUID
+    locale: str
+    line_count: int
+    # True when these captions queued a fresh analysis to read them. False
+    # when nothing changed, or when the next analysis will read them anyway.
+    analysis_queued: bool
+
+
+class CaptionLineResponse(BaseModel):
+    sequence: int
+    start_time: float
+    end_time: float
+    text: str
+
+
+class CaptionsResponse(BaseModel):
+    recording_id: uuid.UUID
+    # Null with no lines when the recorder sent no captions, which is the
+    # normal case for every recorder but the iPhone.
+    locale: str | None
+    updated_at: datetime | None
+    lines: list[CaptionLineResponse]
+    furigana: FuriganaMap = Field(default_factory=dict)
+
+
 class BilingualDescription(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -15,8 +15,13 @@ from audio_server.processing.analysis import (
     LMStudioAnalysisProvider,
     LMStudioSettings,
     chunk_transcript,
+    chunk_transcript_with_captions,
 )
-from audio_server.processing.contracts import AnalysisStatus, MergedTranscriptSegment
+from audio_server.processing.contracts import (
+    AnalysisStatus,
+    CaptionLine,
+    MergedTranscriptSegment,
+)
 from audio_server.processing.errors import (
     PermanentProcessingError,
     ProviderConfigurationError,
@@ -556,6 +561,112 @@ def test_chunking_covers_oversized_segment_tail() -> None:
     assert "開始" in chunks[0]
     assert "終了" in chunks[-1]
     assert all(len(chunk) <= 1000 for chunk in chunks)
+
+
+def _caption(text: str = "一旦こちらで持ち帰ります", start: float = 84.5) -> CaptionLine:
+    return CaptionLine(start=start, end=start + 2, text=text)
+
+
+def _provider(model: FakeModel) -> LMStudioAnalysisProvider:
+    return LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([model])),
+    )
+
+
+def test_captions_are_read_beside_the_transcript_but_never_quoted() -> None:
+    heard_only_by_the_phone = "来週の木曜日に決めましょう"
+    draft = _draft()
+    draft["highlights"] = [
+        {
+            "segment_sequence": 12,
+            "original_ja": heard_only_by_the_phone,
+            "translation_zh_hk": "下星期四決定啦。",
+            "reason_ja": "字幕にしかない発言です。",
+            "reason_zh_hk": "只有字幕有呢句。",
+        }
+    ]
+    model = FakeModel(draft)
+
+    result = _provider(model).analyze(
+        "recording-id",
+        [_segment()],
+        [_caption(heard_only_by_the_phone, start=91.0), _caption()],
+    )
+
+    prompt, _kwargs = model.calls[0]
+    assert "never from a CAPTION" in prompt
+    # Both readings of the same moment sit side by side, in spoken order.
+    assert (
+        prompt.index("SEGMENT 12 | SPEAKER_01 | 84.200s")
+        < prompt.index("CAPTION | 84.500s")
+        < prompt.index("CAPTION | 91.000s")
+    )
+    assert result.data is not None
+    # A quote must exist in the segment it cites, so caption wording never passes.
+    assert result.data["highlights"] == []
+    assert len(result.data["natural_expressions"]) == 1  # type: ignore[arg-type]
+
+
+def test_without_captions_the_transcript_prompt_is_unchanged() -> None:
+    model = FakeModel(_draft())
+
+    _provider(model).analyze("recording-id", [_segment()])
+
+    prompt, _kwargs = model.calls[0]
+    assert prompt.startswith("Analyze the Japanese transcript below.")
+    assert "CAPTION" not in prompt
+
+
+def test_captions_alone_are_still_described_but_never_quoted() -> None:
+    draft = _draft()
+    model = FakeModel(draft)
+
+    result = _provider(model).analyze("recording-id", [], [_caption()])
+
+    assert len(model.calls) == 1
+    assert result.status is AnalysisStatus.COMPLETED
+    assert result.data is not None
+    assert result.data["summary"] == draft["summary"]
+    # With no segment to cite, nothing can be quoted.
+    assert result.data["natural_expressions"] == []
+
+
+def test_chunking_with_captions_keeps_spoken_order_within_the_budget() -> None:
+    segments = [
+        MergedTranscriptSegment(
+            sequence=index,
+            speaker_label="SPEAKER_00",
+            start=index * 10.0,
+            end=index * 10.0 + 5,
+            text="あ" * 300,
+        )
+        for index in range(6)
+    ]
+    # The first caption starts with its segment; the rest a second after theirs.
+    captions = [
+        CaptionLine(start=index * 10.0 + min(index, 1), end=index * 10.0 + 4, text="い" * 300)
+        for index in range(6)
+    ]
+
+    chunks = chunk_transcript_with_captions(segments, captions, 1000)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 1000 for chunk in chunks)
+    headings = [
+        line
+        for chunk in chunks
+        for line in chunk.splitlines()
+        if line.startswith(("SEGMENT", "CAPTION"))
+    ]
+    # A segment and a caption that start together put the citable segment first.
+    assert headings[:4] == [
+        "SEGMENT 0 | SPEAKER_00 | 0.000s",
+        "CAPTION | 0.000s",
+        "SEGMENT 1 | SPEAKER_00 | 10.000s",
+        "CAPTION | 11.000s",
+    ]
+    assert len(headings) == 12
 
 
 def test_safe_violations_reports_paths_and_rules_without_model_content() -> None:

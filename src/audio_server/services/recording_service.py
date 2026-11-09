@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from audio_server.activity.repository import append_activity
 from audio_server.api.schemas import (
     AnalysisResultV2,
+    CaptionLineInput,
     ClientRecordingMetadata,
     TranscriptSegmentUpdate,
     TranslationUpdate,
@@ -34,12 +35,13 @@ from audio_server.db.models import (
     JobStatus,
     ProcessingJob,
     Recording,
+    RecordingCaptions,
     RecordingStatus,
     TranscriptSegment,
     TranscriptTranslation,
     TranslationSource,
 )
-from audio_server.jobs.queue import chained_follow_up
+from audio_server.jobs.queue import chained_follow_up, read_automatic_follow_ups
 from audio_server.processing.contracts import AudioPreprocessor, AudioProbe
 from audio_server.processing.errors import (
     PermanentProcessingError,
@@ -73,6 +75,13 @@ class RecordingServiceError(Exception):
 class IngestResult:
     recording: Recording
     duplicate: bool
+
+
+@dataclass(frozen=True)
+class CaptionsStored:
+    locale: str
+    line_count: int
+    analysis_queued: bool
 
 
 class RecordingService:
@@ -406,6 +415,116 @@ class RecordingService:
                     status_code=409,
                 )
             return recording, segments
+
+    def get_captions(
+        self, recording_id: uuid.UUID
+    ) -> tuple[Recording, RecordingCaptions | None]:
+        with self._session_factory() as session:
+            recording = session.get(Recording, recording_id)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            captions = session.scalar(
+                select(RecordingCaptions).where(RecordingCaptions.recording_id == recording_id)
+            )
+            return recording, captions
+
+    def store_captions(
+        self,
+        recording_id: uuid.UUID,
+        *,
+        header_device_id: str,
+        locale: str,
+        lines: Sequence[CaptionLineInput],
+    ) -> CaptionsStored:
+        """Keep a recorder's live captions and let the analysis read them.
+
+        Captions are an input to the analysis, so new ones leave the last
+        reading out of date exactly as a transcript edit does: it is flagged
+        stale rather than cleared. With automatic analysis on, a fresh analysis
+        is queued once the transcript exists and nothing else is running. A
+        recording still being transcribed needs nothing queued, because the
+        analysis its transcription chains reads the captions when it starts.
+
+        Resending the captions already stored changes nothing, so a device
+        retrying an upload whose answer it never saw cannot cost an analysis.
+        """
+
+        document = [
+            {"start": line.start, "end": line.end, "text": line.text}
+            for line in sorted(lines, key=lambda line: (line.start, line.end))
+        ]
+        with self._session_factory.begin() as session:
+            recording = session.get(Recording, recording_id, with_for_update=True)
+            if recording is None:
+                raise RecordingServiceError(
+                    "recording_not_found", "Recording was not found.", status_code=404
+                )
+            if recording.device_id != header_device_id:
+                raise RecordingServiceError(
+                    "captions_device_mismatch",
+                    "Captions must come from the device that made the recording.",
+                    status_code=409,
+                )
+            captions = session.scalar(
+                select(RecordingCaptions)
+                .where(RecordingCaptions.recording_id == recording_id)
+                .with_for_update()
+            )
+            if captions is not None and captions.locale == locale and captions.lines == document:
+                return CaptionsStored(
+                    locale=locale, line_count=len(document), analysis_queued=False
+                )
+            if captions is None:
+                session.add(
+                    RecordingCaptions(recording_id=recording_id, locale=locale, lines=document)
+                )
+            else:
+                captions.locale = locale
+                captions.lines = document
+            analysis = session.scalar(
+                select(Analysis).where(Analysis.recording_id == recording_id).with_for_update()
+            )
+            if analysis is not None and analysis.status is AnalysisStatus.COMPLETED:
+                analysis.status = AnalysisStatus.STALE
+                recording.analysis_revision += 1
+            wants_analysis = (
+                recording.processing_status is RecordingStatus.COMPLETED
+                and read_automatic_follow_ups(session).analysis
+            )
+        logger.info(
+            "recording captions stored",
+            extra={"recording_id": str(recording_id), "caption_lines": len(document)},
+        )
+
+        analysis_queued = False
+        if wants_analysis:
+            # Queued in a transaction of its own, so captions that arrive while
+            # another job holds the recording are still kept. The analysis that
+            # job chains reads them; one already running has read its inputs
+            # and stays stale until it is asked for again.
+            try:
+                self._enqueue_processing(
+                    recording_id,
+                    allowed_statuses=frozenset({RecordingStatus.COMPLETED}),
+                    disallowed_code="analysis_not_reprocessable",
+                    disallowed_message="Analysis can be queued after transcription completes.",
+                    kind=JobKind.ANALYSIS,
+                    event_type=ProcessingActivityType.JOB_QUEUED,
+                )
+                analysis_queued = True
+            except RecordingServiceError as error:
+                logger.info(
+                    "captions left for a later analysis",
+                    extra={"recording_id": str(recording_id), "reason": error.code},
+                )
+            except IntegrityError as error:
+                if not _lost_active_job_race(error):
+                    raise
+        return CaptionsStored(
+            locale=locale, line_count=len(document), analysis_queued=analysis_queued
+        )
 
     def get_analysis(self, recording_id: uuid.UUID) -> Analysis:
         with self._session_factory() as session:
@@ -894,6 +1013,11 @@ class RecordingService:
                         TranscriptSegment.recording_id == recording_id
                     )
                 )
+                session.execute(
+                    sql_delete(RecordingCaptions).where(
+                        RecordingCaptions.recording_id == recording_id
+                    )
+                )
                 session.execute(sql_delete(Analysis).where(Analysis.recording_id == recording_id))
                 # A day summary is written from that day's analyses, so it can
                 # describe or quote this recording. Its overview blends every
@@ -969,6 +1093,7 @@ class RecordingService:
         disallowed_message: str,
         kind: JobKind = JobKind.FULL,
         require_transcript: bool = False,
+        event_type: ProcessingActivityType = ProcessingActivityType.MANUAL_RETRY_QUEUED,
     ) -> ProcessingJob:
         now = datetime.now(UTC)
         with self._session_factory.begin() as session:
@@ -1027,7 +1152,7 @@ class RecordingService:
                 recording_id=recording.id,
                 job_id=job.id,
                 job_kind=kind,
-                event_type=ProcessingActivityType.MANUAL_RETRY_QUEUED,
+                event_type=event_type,
                 job_status=JobStatus.QUEUED,
                 stage=JobStage.QUEUED,
                 attempt_count=0,

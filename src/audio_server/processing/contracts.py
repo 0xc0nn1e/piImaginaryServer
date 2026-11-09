@@ -157,6 +157,24 @@ class MergedTranscriptSegment:
 
 
 @dataclass(frozen=True, slots=True)
+class CaptionLine:
+    """One line a recorder captioned on the device while it recorded.
+
+    Timed from the start of the recording like a transcript segment, but with
+    no speaker: the device hears one microphone and does not separate voices.
+    """
+
+    start: float
+    end: float
+    text: str
+
+    def __post_init__(self) -> None:
+        _validate_interval(self.start, self.end, allow_empty=True)
+        if not self.text.strip():
+            raise ValueError("caption text cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisResult:
     status: AnalysisStatus
     provider: str
@@ -259,8 +277,13 @@ class AnalysisProvider(Protocol):
         self,
         recording_id: str,
         segments: Sequence[MergedTranscriptSegment],
+        captions: Sequence[CaptionLine] = (),
     ) -> AnalysisResult:
-        """Analyze a transcript without depending on transcription internals."""
+        """Analyze a transcript without depending on transcription internals.
+
+        ``captions`` is the recorder's own reading of the same speech, which
+        only some recorders send. Quotes still come from ``segments`` alone.
+        """
 
 
 @dataclass(frozen=True, slots=True)

@@ -225,6 +225,22 @@ export interface TranscriptResponse {
   translation_revision: number;
 }
 
+export interface CaptionLine {
+  sequence: number;
+  start_time: number;
+  end_time: number;
+  text: string;
+}
+
+/** Live captions the recording iPhone made; empty for every other recorder. */
+export interface CaptionsResponse {
+  recording_id: string;
+  locale: string | null;
+  updated_at: string | null;
+  lines: CaptionLine[];
+  furigana: FuriganaMap;
+}
+
 export type AnalysisStatus = "completed" | "skipped" | "failed" | "stale";
 
 export interface BilingualText {

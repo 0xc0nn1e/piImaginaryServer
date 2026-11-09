@@ -18,6 +18,10 @@ from audio_server.api.schemas import (
     AnalysisResponse,
     AnalysisResultV2,
     AnalysisUpdateRequest,
+    CaptionLineResponse,
+    CaptionsResponse,
+    CaptionUploadRequest,
+    CaptionUploadResponse,
     ClientRecordingMetadata,
     FuriganaToken,
     JobError,
@@ -193,6 +197,56 @@ def get_transcript(
         ],
         translation_revision=recording.translation_revision,
         furigana=_segment_furigana(segment_responses),
+    )
+
+
+@router.put("/{recording_id}/captions", response_model=CaptionUploadResponse)
+def upload_captions(
+    recording_id: uuid.UUID,
+    payload: CaptionUploadRequest,
+    device_id: Annotated[str, Header(alias="X-Device-ID", min_length=1, max_length=128)],
+    _machine_principal: Annotated[object, Depends(require_machine_principal)],
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> CaptionUploadResponse:
+    """Replace the live captions the recording device made for this recording."""
+
+    stored = service.store_captions(
+        recording_id,
+        header_device_id=device_id,
+        locale=payload.locale,
+        lines=payload.lines,
+    )
+    return CaptionUploadResponse(
+        recording_id=recording_id,
+        locale=stored.locale,
+        line_count=stored.line_count,
+        analysis_queued=stored.analysis_queued,
+    )
+
+
+@router.get("/{recording_id}/captions", response_model=CaptionsResponse)
+def get_captions(
+    recording_id: uuid.UUID,
+    service: Annotated[RecordingService, Depends(get_recording_service)],
+) -> CaptionsResponse:
+    _recording, captions = service.get_captions(recording_id)
+    if captions is None:
+        return CaptionsResponse(recording_id=recording_id, locale=None, updated_at=None, lines=[])
+    lines = [
+        CaptionLineResponse(
+            sequence=index,
+            start_time=float(line["start"]),
+            end_time=float(line["end"]),
+            text=str(line["text"]),
+        )
+        for index, line in enumerate(captions.lines)
+    ]
+    return CaptionsResponse(
+        recording_id=recording_id,
+        locale=captions.locale,
+        updated_at=captions.updated_at,
+        lines=lines,
+        furigana=_caption_furigana(captions.locale, lines),
     )
 
 
@@ -424,6 +478,20 @@ def _segment_furigana(
     return {
         text: [FuriganaToken.model_validate(token) for token in tokens]
         for text, tokens in annotate_all([segment.text for segment in segments]).items()
+    }
+
+
+def _caption_furigana(
+    locale: str, lines: list[CaptionLineResponse]
+) -> dict[str, list[FuriganaToken]]:
+    # Readings are Japanese ones. Captions heard as another language can still
+    # be written in Chinese characters, and a Japanese reading over those
+    # would teach the wrong word.
+    if not locale.lower().startswith("ja"):
+        return {}
+    return {
+        text: [FuriganaToken.model_validate(token) for token in tokens]
+        for text, tokens in annotate_all([line.text for line in lines]).items()
     }
 
 
