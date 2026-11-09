@@ -699,6 +699,8 @@ def _build_pipeline(settings: Settings) -> ProcessingPipeline:
             language=settings.whisper_language or None,
             download_root=settings.whisper_cache_dir,
             cpu_threads=settings.whisper_cpu_threads,
+            vad_filter=settings.whisper_vad_filter,
+            condition_on_previous_text=settings.whisper_condition_on_previous_text,
         )
     )
     if settings.diarization_enabled:

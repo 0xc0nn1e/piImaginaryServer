@@ -234,6 +234,8 @@ def test_faster_whisper_generator_is_fully_materialized_and_mapped() -> None:
         def transcribe(self, audio_path: str, **kwargs: Any) -> tuple[Any, Any]:
             assert audio_path == "processing.wav"
             assert kwargs["word_timestamps"] is True
+            assert kwargs["vad_filter"] is True
+            assert kwargs["condition_on_previous_text"] is False
 
             def segments() -> Any:
                 yield SimpleNamespace(

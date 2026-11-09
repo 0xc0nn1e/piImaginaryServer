@@ -30,7 +30,8 @@ class FasterWhisperSettings:
     beam_size: int = 5
     cpu_threads: int = 0
     num_workers: int = 1
-    vad_filter: bool = False
+    vad_filter: bool = True
+    condition_on_previous_text: bool = False
 
     def __post_init__(self) -> None:
         if not self.model.strip() or not self.device.strip() or not self.compute_type.strip():
@@ -64,6 +65,7 @@ class FasterWhisperProvider:
                 beam_size=self._settings.beam_size,
                 word_timestamps=True,
                 vad_filter=self._settings.vad_filter,
+                condition_on_previous_text=self._settings.condition_on_previous_text,
             )
             language = _optional_text(getattr(info, "language", None))
             segments = tuple(

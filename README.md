@@ -248,6 +248,8 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `WHISPER_COMPUTE_TYPE` | `int8` | CTranslate2 compute type; `float16` is typical for CUDA. |
 | `WHISPER_LANGUAGE` | blank/unset | Leaving it blank enables language detection; set `ja` only when input is known to be Japanese. |
 | `WHISPER_CPU_THREADS` | `4` | CPU threads allocated to a Whisper model instance. |
+| `WHISPER_VAD_FILTER` | `true` | Skips silence before decoding, which stops Whisper inventing filler such as repeated `はい` in quiet stretches. |
+| `WHISPER_CONDITION_ON_PREVIOUS_TEXT` | `false` | Decodes each window without the previous text as a prompt, so one misheard phrase is not repeated line after line. |
 | `WHISPER_CACHE_DIR` | model cache path | faster-whisper download/cache root. |
 | `DIARIZATION_ENABLED` | `true` | Enables pyannote speaker diarization. |
 | `DIARIZATION_MODEL` | Community-1 | Gated Hugging Face model ID. |

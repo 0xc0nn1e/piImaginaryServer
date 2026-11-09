@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     whisper_language: str | None = None
     whisper_cpu_threads: int = 4
     whisper_cache_dir: Path | None = None
+    # Skipping silence keeps Whisper from inventing short filler words there,
+    # and decoding each window on its own stops one mistake repeating itself.
+    whisper_vad_filter: bool = True
+    whisper_condition_on_previous_text: bool = False
 
     diarization_enabled: bool = True
     diarization_model: str = "pyannote/speaker-diarization-community-1"
