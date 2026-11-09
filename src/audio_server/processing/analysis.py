@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from audio_server.api.schemas import (
     AnalysisHighlight,
@@ -150,6 +150,32 @@ class _AnalysisDraft(BaseModel):
     tags: list[_DraftTag] = Field(max_length=12)
     natural_expressions: list[_DraftExpression] = Field(max_length=20)
     highlights: list[_DraftHighlight] = Field(max_length=12)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def drop_invalid_tags(cls, value: object) -> object:
+        """Leave out a tag that breaks its own limits instead of the whole draft.
+
+        Tags are the least important part of an analysis, yet one over-long or
+        empty entry used to fail every other field with it. A tag is kept or
+        dropped whole, never shortened, and only the number dropped is logged.
+        """
+
+        if not isinstance(value, list):
+            return value
+        kept: list[object] = []
+        for item in value:
+            try:
+                _DraftTag.model_validate(item)
+            except ValidationError:
+                continue
+            kept.append(item)
+        if len(kept) < len(value):
+            logger.warning(
+                "Dropped invalid tags from an LLM analysis",
+                extra={"dropped_tags": len(value) - len(kept)},
+            )
+        return kept
 
 
 class _GenerationDescription(BaseModel):

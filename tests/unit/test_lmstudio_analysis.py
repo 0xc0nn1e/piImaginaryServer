@@ -503,6 +503,36 @@ def test_lmstudio_enforces_string_limits_after_structured_generation() -> None:
     assert caught.value.code == "lmstudio_schema_invalid"
 
 
+def test_an_invalid_tag_is_dropped_without_losing_the_analysis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "機密の発話" * 17  # 85 characters, over the 80-character tag limit
+    draft = _draft()
+    draft["tags"] = [
+        {"ja": secret, "zh_hk": secret},
+        {"ja": "", "zh_hk": "空白"},
+        {"ja": "検討", "zh_hk": "研究"},
+    ]
+    provider = LMStudioAnalysisProvider(
+        LMStudioSettings(host="lmstudio.test:1234"),
+        client_factory=lambda _settings: FakeContext(FakeClient([FakeModel(draft)])),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="audio_server.processing.analysis"):
+        result = provider.analyze("recording-id", [_segment()])
+
+    # One bad tag used to fail the whole analysis; now only that tag is lost.
+    assert result.status is AnalysisStatus.COMPLETED
+    assert result.data is not None
+    assert result.data["tags"] == [{"ja": "検討", "zh_hk": "研究"}]
+    assert result.data["summary"]["ja"].startswith("来週")  # type: ignore[index]
+    assert len(result.data["natural_expressions"]) == 1  # type: ignore[arg-type]
+    record = next(item for item in caplog.records if "Dropped invalid tags" in item.getMessage())
+    assert record.dropped_tags == 2
+    # The dropped tags are model output and must never reach the log.
+    assert all(secret not in item.getMessage() for item in caplog.records)
+
+
 def test_lmstudio_hierarchically_reduces_and_deduplicates_all_chunks() -> None:
     quote = "一旦こちらで持ち帰ります。"
     model = FakeModel(_draft())
