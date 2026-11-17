@@ -1,20 +1,22 @@
 import { type FormEvent, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { ApiError } from "../api";
+import { ApiError, startIgniteLogin } from "../api";
 import { useAuth } from "../auth/AuthContext";
 import { LanguageSwitch } from "../components/LanguageSwitch";
 import { useI18n } from "../i18n";
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, authMode } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    new URLSearchParams(location.search).has("ignite_error") ? "ignite" : null,
+  );
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -32,6 +34,18 @@ export function LoginPage() {
           : t("login.failed"),
       );
     } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleIgniteLogin() {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await startIgniteLogin();
+      window.location.assign(result.authorization_url);
+    } catch {
+      setError("ignite");
       setSubmitting(false);
     }
   }
@@ -65,38 +79,48 @@ export function LoginPage() {
       <section className="auth-card login-card">
         <p className="step-label">{t("login.secureAccess")}</p>
         <h2>{t("login.title")}</h2>
-        <p className="muted">{t("login.hint")}</p>
-        <form onSubmit={(event) => void handleSubmit(event)}>
-          <label>
-            {t("login.username")}
-            <input
-              autoComplete="username"
-              name="username"
-              required
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-            />
-          </label>
-          <label>
-            {t("login.password")}
-            <input
-              autoComplete="current-password"
-              name="password"
-              required
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-            />
-          </label>
-          {error ? (
-            <p className="form-error" role="alert">
-              {error}
-            </p>
-          ) : null}
-          <button className="button button-primary button-full" disabled={submitting} type="submit">
-            {submitting ? t("login.submitting") : t("login.submit")}
-          </button>
-        </form>
+        <p className="muted">{t(authMode === "ignite" ? "login.igniteHint" : "login.hint")}</p>
+        {authMode === "ignite" ? (
+          <>
+            {error ? <p className="form-error" role="alert">{t("login.igniteFailed")}</p> : null}
+            <button className="button button-primary button-full" disabled={submitting}
+              type="button" onClick={() => void handleIgniteLogin()}>
+              {submitting ? t("login.submitting") : t("login.igniteSubmit")}
+            </button>
+          </>
+        ) : (
+          <form onSubmit={(event) => void handleSubmit(event)}>
+            <label>
+              {t("login.username")}
+              <input
+                autoComplete="username"
+                name="username"
+                required
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("login.password")}
+              <input
+                autoComplete="current-password"
+                name="password"
+                required
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+            </label>
+            {error ? (
+              <p className="form-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+            <button className="button button-primary button-full" disabled={submitting} type="submit">
+              {submitting ? t("login.submitting") : t("login.submit")}
+            </button>
+          </form>
+        )}
         <p className="auth-footnote">{t("login.sessionNote")}</p>
       </section>
     </main>

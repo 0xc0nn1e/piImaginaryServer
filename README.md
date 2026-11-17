@@ -220,7 +220,8 @@ gitignored `.env` file. Empty or placeholder production secrets are invalid.
 | `DOCS_ENABLED` | `false` | Enable OpenAPI schema and interactive documentation. Always forced off when `APP_ENV=production`, because those routes are unauthenticated. |
 | `API_TOKEN` | empty | Machine Bearer credential required for upload/retry and accepted for recording reads. |
 | `WEB_SETUP_TOKEN` | empty | One-time secret of at least 32 characters; leave empty after the first administrator exists. |
-| `WEB_SESSION_HOURS` | `12` | Lifetime of an opaque browser session. |
+| `WEB_SESSION_HOURS` | `12` | Maximum lifetime of an opaque browser session, counted from login. |
+| `WEB_SESSION_IDLE_MINUTES` | `120` | A session expires after this much inactivity; activity extends it up to `WEB_SESSION_HOURS`. |
 | `WEB_COOKIE_SECURE` | `false` | Set `true` whenever the browser uses HTTPS. |
 | `WEB_ALLOWED_ORIGIN` | `http://127.0.0.1:3000` | Exact browser origin accepted for state-changing auth requests; no wildcard or path. |
 | `WEB_AUTH_MAX_REQUEST_BYTES` | `4096` | Total request-body cap for setup and login JSON. |
@@ -1204,3 +1205,64 @@ Likely next steps, after ingestion and transcript durability are proven:
 5. Add a real optional analysis provider and versioned result schemas.
 6. Add PostgreSQL full-text search before evaluating embeddings and RAG.
 7. Update the separate Pi uploader to stop retrying permanent 4xx responses.
+
+### Sign in through Ignite
+
+Wave Archive can use Ignite as an OIDC confidential client. Set
+`WEB_AUTH_MODE=ignite` to replace local setup/password sign-in with the
+**Sign in with Ignite** button. Leave `local` for existing installations until
+registration is complete. Machine Bearer uploads are unchanged.
+
+1. Register a confidential client in Ignite with the exact redirect URI
+   `<WEB_ALLOWED_ORIGIN>/api/v1/auth/oidc/callback`. Use authorization code,
+   PKCE S256 and `client_secret_basic`; only the `openid` scope is needed.
+   Register the public browser origin, not the internal API/container address.
+2. Set `IGNITE_ISSUER` to the exact issuer (no trailing slash),
+   `IGNITE_CLIENT_ID`, and `IGNITE_CLIENT_SECRET` in the deployment secret
+   store/local `.env`. The browser and API must both reach the issuer; discovery
+   and JWKS are fetched at sign-in, not during startup or health checks. The
+   discovered endpoints must share the issuer origin. HTTPS is required in
+   production; HTTP is only for trusted local development.
+3. Set `IGNITE_ADMIN_SUB` to the intended administrator's immutable Ignite
+   subject UUID, obtained from the Ignite administrator. This explicit subject
+   is the only authorized identity; email and global role do not grant access.
+   On the first successful sign-in it uses the existing single administrator
+   row, preserving that account's bookmarks. A new installation creates an
+   `ignite-admin` row. Disabled local accounts remain disabled.
+4. Run `alembic upgrade head` (revision `0014_ignite_auth`) before starting the
+   updated API. Configure `WEB_ALLOWED_ORIGIN` and secure cookies as usual.
+   Rebuild the API/web images and restart them in your normal deployment process.
+   These settings and credentials belong only on the API, not either worker.
+
+Ignite handles passwords and two-factor authentication. Wave Archive validates
+RS256 signatures, issuer, audience, expiry, nonce and subject, with a single-use
+PostgreSQL login attempt bound to an HttpOnly SameSite=Lax cookie. Access and ID
+tokens are not persisted or exposed to the SPA. Existing local sessions are
+rejected in Ignite mode; sessions also stop working when issuer, client ID or
+allowed subject changes. Local setup, password login and password reset are
+unavailable in Ignite mode. No account data is deleted by the migration.
+
+Ignite sessions expire after `WEB_SESSION_IDLE_MINUTES` (default 120) of inactivity
+and at most `WEB_SESSION_HOURS` (default 12) after login. Session/CSRF cookies retain
+SameSite=Strict. Logout ends the Wave Archive session only; the Ignite SSO
+session stays active. Sign out at Ignite to end that SSO session. There is no
+refresh-token or back-channel logout integration: an account disabled at Ignite
+can retain its existing Wave Archive session until it expires.
+
+The two added endpoints are `POST /api/v1/auth/oidc/login` (exact Origin required,
+returns an authorization URL and sets a flow cookie) and
+`GET /api/v1/auth/oidc/callback` (single-use state and browser binding required).
+`GET /api/v1/auth/setup-status` now also returns `auth_mode: local | ignite`.
+Failed callbacks redirect to a generic localized login error, without provider
+payloads. Each login start counts against the existing per-address login limit.
+Starting again replaces the browser's pending flow; unused flows expire after
+five minutes and are purged on subsequent starts.
+
+The provided Nginx and API logging configuration suppress request access logs
+and callback proxy error logs so authorization codes cannot enter those logs.
+Configure any outer reverse proxy or
+observability agent likewise: never record callback queries, cookies, client
+secrets or token exchange payloads. For native Uvicorn use `--no-access-log`.
+
+Protocol references: [OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html)
+and [PyJWT validation](https://pyjwt.readthedocs.io/en/stable/usage.html).

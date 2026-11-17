@@ -66,6 +66,7 @@ class WebSession(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     session_token_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    identity_digest: Mapped[str | None] = mapped_column(String(64))
     csrf_token_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -75,3 +76,16 @@ class WebSession(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class OIDCLoginFlow(Base):
+    """Single-use browser-bound authorization attempts; no raw credentials."""
+
+    __tablename__ = "oidc_login_flows"
+
+    state_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    browser_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    identity_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )

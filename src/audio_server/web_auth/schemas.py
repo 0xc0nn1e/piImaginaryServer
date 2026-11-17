@@ -33,6 +33,7 @@ class UserResponse(BaseModel):
 
 
 class SetupStatusResponse(BaseModel):
+    auth_mode: Literal["local", "ignite"] = "local"
     setup_required: bool
     setup_enabled: bool
 

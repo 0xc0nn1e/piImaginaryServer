@@ -41,6 +41,11 @@ def configure_logging(level: str, log_format: str) -> None:
                     "formatter": formatter,
                 }
             },
+            "loggers": {
+                "uvicorn.access": {"handlers": [], "propagate": False},
+                "httpx": {"handlers": [], "propagate": False, "level": "CRITICAL"},
+                "httpcore": {"handlers": [], "propagate": False, "level": "CRITICAL"},
+            },
             "root": {"handlers": ["console"], "level": level},
         }
     )

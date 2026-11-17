@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import secrets
-from typing import Annotated, TypeVar
+from typing import Annotated, TypeVar, cast
 
+import httpx
+import jwt
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
 from audio_server.core.client_address import resolve_client_ip
 from audio_server.web_auth.dependencies import (
     get_web_auth_service,
     require_web_session,
+)
+from audio_server.web_auth.oidc import (
+    CALLBACK_PATH,
+    FLOW_COOKIE,
+    FLOW_SECONDS,
+    IgniteClient,
+    oidc_error,
 )
 from audio_server.web_auth.schemas import (
     LoginRequest,
@@ -27,6 +37,7 @@ from audio_server.web_auth.schemas import (
 )
 from audio_server.web_auth.service import (
     AuthenticatedWebSession,
+    LoginResult,
     WebAuthError,
     WebAuthService,
     rate_limit_key,
@@ -37,6 +48,8 @@ PUBLIC_WEB_AUTH_PATHS = frozenset(
         "/api/v1/auth/setup-status",
         "/api/v1/auth/setup",
         "/api/v1/auth/login",
+        "/api/v1/auth/oidc/login",
+        CALLBACK_PATH,
     }
 )
 
@@ -52,6 +65,7 @@ async def setup_status(
     status = await run_in_threadpool(service.get_setup_status)
     _set_no_store(response)
     return SetupStatusResponse(
+        auth_mode="ignite" if service.identity_digest is not None else "local",
         setup_required=status.setup_required,
         setup_enabled=status.setup_enabled,
     )
@@ -100,6 +114,15 @@ async def login(
         password=payload.password,
         rate_limit_key=rate_limit_key(client_ip),
     )
+    _set_session_cookies(response, service, result)
+    _set_no_store(response)
+    return LoginResponse(
+        user=_user_response(result.principal.user),
+        expires_at=result.principal.expires_at,
+    )
+
+
+def _set_session_cookies(response: Response, service: WebAuthService, result: LoginResult) -> None:
     response.set_cookie(
         key=service.cookie_name,
         value=result.session_token,
@@ -123,11 +146,81 @@ async def login(
         httponly=False,
         samesite="strict",
     )
-    _set_no_store(response)
-    return LoginResponse(
-        user=_user_response(result.principal.user),
-        expires_at=result.principal.expires_at,
+
+
+class OIDCStartResponse(BaseModel):
+    authorization_url: str
+
+
+def _ignite_client(request: Request) -> IgniteClient:
+    client = getattr(request.app.state, "ignite_client", None)
+    if client is None:
+        raise oidc_error()
+    return cast(IgniteClient, client)
+
+
+@router.post("/oidc/login", response_model=OIDCStartResponse)
+def oidc_login(
+    request: Request,
+    response: Response,
+    service: Annotated[WebAuthService, Depends(get_web_auth_service)],
+) -> OIDCStartResponse:
+    _require_exact_origin(request, service)
+    client = _ignite_client(request)
+    ip = resolve_client_ip(
+        peer_host=request.client.host if request.client else None,
+        forwarded_for=request.headers.getlist("x-forwarded-for"),
+        trusted_networks=service.trusted_proxy_networks,
     )
+    service.throttle_oidc(rate_limit_key(ip))
+    try:
+        url, browser = client.start()
+    except (httpx.HTTPError, ValueError, WebAuthError):
+        raise oidc_error() from None
+    response.set_cookie(
+        FLOW_COOKIE,
+        browser,
+        max_age=FLOW_SECONDS,
+        path="/",
+        secure=service.cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
+    _set_no_store(response)
+    return OIDCStartResponse(authorization_url=url)
+
+
+@router.get("/oidc/callback")
+def oidc_callback(
+    request: Request,
+    service: Annotated[WebAuthService, Depends(get_web_auth_service)],
+) -> Response:
+    response = RedirectResponse("/login?ignite_error=1", status_code=303)
+    try:
+        client = _ignite_client(request)
+        params = request.query_params
+        if (
+            len(str(params)) > 2048
+            or "error" in params
+            or len(params.getlist("state")) != 1
+            or len(params.getlist("code")) != 1
+        ):
+            raise oidc_error()
+        client.finish(
+            state=params["state"], code=params["code"], browser=request.cookies.get(FLOW_COOKIE, "")
+        )
+        result = service.login_oidc()
+        response = RedirectResponse("/recordings", status_code=303)
+        _set_session_cookies(response, service, result)
+    except (httpx.HTTPError, ValueError, jwt.PyJWTError, WebAuthError, IntegrityError):
+        # Never reflect or log codes, tokens, provider errors or exceptions.
+        pass
+    response.delete_cookie(
+        FLOW_COOKIE, path="/", secure=service.cookie_secure, httponly=True, samesite="lax"
+    )
+    _set_no_store(response)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @router.get("/me", response_model=MeResponse)
@@ -180,7 +273,7 @@ def register_web_auth_error_handler(app: FastAPI) -> None:
         return JSONResponse(
             status_code=error.status_code,
             content={"error": {"code": error.code, "message": error.safe_message}},
-            headers=error.headers,
+            headers={"Cache-Control": "no-store", **(error.headers or {})},
         )
 
 

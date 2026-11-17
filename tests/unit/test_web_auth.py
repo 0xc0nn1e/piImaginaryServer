@@ -180,7 +180,7 @@ def test_setup_is_origin_and_token_guarded_and_permanently_single_admin(
     session_factory: sessionmaker[Session],
 ) -> None:
     status = auth_client.get("/api/v1/auth/setup-status")
-    assert status.json() == {"setup_required": True, "setup_enabled": True}
+    assert status.json() == {"auth_mode": "local", "setup_required": True, "setup_enabled": True}
     assert status.headers["cache-control"] == "no-store"
 
     missing_origin = auth_client.post(
@@ -211,6 +211,7 @@ def test_setup_is_origin_and_token_guarded_and_permanently_single_admin(
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "setup_already_completed"
     assert auth_client.get("/api/v1/auth/setup-status").json() == {
+        "auth_mode": "local",
         "setup_required": False,
         "setup_enabled": False,
     }
@@ -407,6 +408,42 @@ def test_session_expiry_is_fixed_and_last_seen_writes_are_throttled(
         )
         is None
     )
+
+
+def test_activity_slides_idle_expiry_up_to_the_session_lifetime(
+    session_factory: sessionmaker[Session],
+) -> None:
+    service = WebAuthService(
+        session_factory,
+        setup_token=SETUP_TOKEN,
+        allowed_origin=TRUSTED_ORIGIN,
+        session_idle_timeout=timedelta(hours=2),
+        password_manager=FastPasswordManager(),
+    )
+    start = datetime(2026, 8, 12, tzinfo=UTC)
+    service.setup_admin(
+        supplied_setup_token=SETUP_TOKEN, username="admin", password=PASSWORD, now=start
+    )
+    login = service.login(
+        username="admin", password=PASSWORD, rate_limit_key="test-client", now=start
+    )
+    assert login.principal.expires_at == start + timedelta(hours=2)
+
+    # Active every 110 minutes: never idle for 2 hours, so the session keeps sliding.
+    at = start
+    for _ in range(6):
+        at += timedelta(minutes=110)
+        resolved = service.resolve_session(login.session_token, now=at)
+        assert resolved is not None
+        assert resolved.expires_at == min(at + timedelta(hours=2), start + timedelta(hours=12))
+
+    # Still capped at 12 hours after login despite the activity.
+    assert service.resolve_session(login.session_token, now=start + timedelta(hours=12)) is None
+
+    idle = service.login(
+        username="admin", password=PASSWORD, rate_limit_key="test-client", now=start
+    )
+    assert service.resolve_session(idle.session_token, now=start + timedelta(hours=2)) is None
 
 
 def test_service_normalizes_injected_non_utc_times(

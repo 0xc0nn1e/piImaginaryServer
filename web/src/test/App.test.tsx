@@ -251,3 +251,59 @@ describe("application routes", () => {
     ).toEqual(["/recordings/recording-2", "/recordings/recording-3"]);
   });
 });
+
+describe("Ignite login", () => {
+  it("offers Ignite in both languages and displays a safe callback error", async () => {
+    window.localStorage.setItem("wave-archive-locale", "ja");
+    window.history.replaceState({}, "", "/login?ignite_error=1");
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input) === "/api/v1/auth/setup-status") {
+        return Promise.resolve(jsonResponse({
+          auth_mode: "ignite", setup_required: false, setup_enabled: false,
+        }));
+      }
+      return Promise.resolve(jsonResponse({ error: { code: "unauthorized" } }, 401));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const browser = userEvent.setup();
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Ignite でログイン" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("パスワード")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Ignite");
+    await browser.click(screen.getByRole("button", { name: "繁體中文" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("未能透過 Ignite 登入");
+    const button = screen.getByRole("button", { name: "使用 Ignite 登入" });
+    await browser.click(button);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/v1/auth/oidc/login",
+      expect.objectContaining({ method: "POST", credentials: "include" })));
+    expect(await screen.findByRole("alert")).toHaveTextContent("未能透過 Ignite 登入");
+    expect(button).toBeEnabled();
+  });
+});
+
+it("navigates to Ignite after preparing a browser-bound login", async () => {
+  window.history.replaceState({}, "", "/login");
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+    if (String(input) === "/api/v1/auth/setup-status") {
+      return Promise.resolve(jsonResponse({
+        auth_mode: "ignite", setup_required: false, setup_enabled: false,
+      }));
+    }
+    if (String(input) === "/api/v1/auth/oidc/login") {
+      return Promise.resolve(jsonResponse({
+        authorization_url: "https://ignite.example.test/oauth2/authorize?state=test",
+      }));
+    }
+    return Promise.resolve(jsonResponse({}, 401));
+  }));
+  const browser = userEvent.setup();
+  render(<App />);
+  const button = await screen.findByRole("button", { name: "使用 Ignite 登入" });
+  const assign = vi.fn();
+  vi.stubGlobal("location", { ...window.location, assign });
+  await browser.click(button);
+  await waitFor(() => expect(assign).toHaveBeenCalledWith(
+    "https://ignite.example.test/oauth2/authorize?state=test",
+  ));
+  expect(button).toBeDisabled();
+});

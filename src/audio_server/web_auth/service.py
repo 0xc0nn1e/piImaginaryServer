@@ -182,8 +182,10 @@ class WebAuthService:
         session_factory: SessionFactory,
         *,
         setup_token: str,
+        identity_digest: str | None = None,
         allowed_origin: str,
         session_lifetime: timedelta = timedelta(hours=12),
+        session_idle_timeout: timedelta | None = None,
         cookie_secure: bool = False,
         max_request_bytes: int = 4096,
         trusted_proxy_networks: TrustedNetworks = (),
@@ -196,12 +198,17 @@ class WebAuthService:
             raise ValueError("allowed_origin cannot be empty")
         if session_lifetime <= timedelta(0):
             raise ValueError("session_lifetime must be positive")
+        if session_idle_timeout is not None and session_idle_timeout <= timedelta(0):
+            raise ValueError("session_idle_timeout must be positive")
         if max_request_bytes < 256:
             raise ValueError("max_request_bytes must be at least 256")
+        self.identity_digest = identity_digest
         self._session_factory = session_factory
         self._setup_token = setup_token
         self.allowed_origin = allowed_origin
         self.session_lifetime = session_lifetime
+        # Activity extends a session by this much, up to session_lifetime after login.
+        self.session_idle_timeout = min(session_idle_timeout or session_lifetime, session_lifetime)
         self.cookie_secure = cookie_secure
         self.max_request_bytes = max_request_bytes
         self.trusted_proxy_networks = trusted_proxy_networks
@@ -215,7 +222,58 @@ class WebAuthService:
             max_entries=2048,
         )
 
+    def require_local_auth(self) -> None:
+        if self.identity_digest is not None:
+            raise WebAuthError(
+                status_code=403,
+                code="local_auth_disabled",
+                safe_message="Sign in through Ignite.",
+            )
+
+    def throttle_oidc(self, key: str) -> None:
+        self._login_limiter.ensure_allowed(key)
+        self._login_limiter.record_failure(key)
+
+    def login_oidc(self) -> LoginResult:
+        """The OIDC adapter calls this only after validating the configured subject."""
+        if self.identity_digest is None:
+            raise _authentication_required_error()
+        now = datetime.now(UTC)
+        with self._session_factory() as session, session.begin():
+            user = session.scalar(select(User).with_for_update())
+            if user is None:
+                user = User(
+                    username="ignite-admin",
+                    password_hash="!",
+                    is_active=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(user)
+                session.flush()
+            if not user.is_active:
+                raise _authentication_required_error()
+            user.last_login_at = now
+            token = secrets.token_urlsafe(TOKEN_BYTES)
+            csrf = secrets.token_urlsafe(TOKEN_BYTES)
+            expires = now + self.session_idle_timeout
+            web_session = WebSession(
+                user_id=user.id,
+                session_token_digest=token_digest(token),
+                csrf_token_digest=token_digest(csrf),
+                identity_digest=self.identity_digest,
+                created_at=now,
+                expires_at=expires,
+                last_seen_at=now,
+            )
+            session.add(web_session)
+            session.flush()
+            principal = AuthenticatedWebSession(_web_user(user), web_session.id, expires)
+        return LoginResult(principal, token, csrf)
+
     def get_setup_status(self) -> SetupStatus:
+        if self.identity_digest is not None:
+            return SetupStatus(setup_required=False, setup_enabled=False)
         with self._session_factory() as session:
             setup_required = session.scalar(select(User.id).limit(1)) is None
         return SetupStatus(
@@ -231,6 +289,7 @@ class WebAuthService:
         password: str,
         now: datetime | None = None,
     ) -> WebUser:
+        self.require_local_auth()
         with self._session_factory() as session:
             if session.scalar(select(User.id).limit(1)) is not None:
                 raise _setup_completed_error()
@@ -277,6 +336,7 @@ class WebAuthService:
         rate_limit_key: str,
         now: datetime | None = None,
     ) -> LoginResult:
+        self.require_local_auth()
         self._login_limiter.ensure_allowed(rate_limit_key)
         normalized_username = _normalize_login_username(username)
         password_valid = 12 <= len(password) <= 128
@@ -302,7 +362,7 @@ class WebAuthService:
             user.updated_at = login_at
             session_token = secrets.token_urlsafe(TOKEN_BYTES)
             csrf_token = secrets.token_urlsafe(TOKEN_BYTES)
-            expires_at = login_at + self.session_lifetime
+            expires_at = login_at + self.session_idle_timeout
             web_session = WebSession(
                 user_id=user.id,
                 session_token_digest=token_digest(session_token),
@@ -344,27 +404,40 @@ class WebAuthService:
                 .where(
                     WebSession.session_token_digest == digest,
                     WebSession.revoked_at.is_(None),
+                    WebSession.identity_digest == self.identity_digest,
                     WebSession.expires_at > checked_at,
                     User.is_active.is_(True),
                 )
             )
             if web_session is None:
                 return None
+            expires_at = _as_utc(web_session.expires_at)
             if touch:
-                session.execute(
-                    update(WebSession)
-                    .where(
-                        WebSession.id == web_session.id,
-                        WebSession.last_seen_at <= checked_at - LAST_SEEN_WRITE_INTERVAL,
-                    )
-                    .values(last_seen_at=checked_at)
-                    .execution_options(synchronize_session=False)
-                )
+                expires_at = self._touch(session, web_session, checked_at)
             return AuthenticatedWebSession(
                 user=_web_user(web_session.user),
                 session_id=web_session.id,
-                expires_at=_as_utc(web_session.expires_at),
+                expires_at=expires_at,
             )
+
+    def _touch(self, session: Session, web_session: WebSession, checked_at: datetime) -> datetime:
+        """Record activity and slide the expiry; writes at most once per interval."""
+
+        expires_at = min(
+            checked_at + self.session_idle_timeout,
+            _as_utc(web_session.created_at) + self.session_lifetime,
+        )
+        updated = session.scalar(
+            update(WebSession)
+            .where(
+                WebSession.id == web_session.id,
+                WebSession.last_seen_at <= checked_at - LAST_SEEN_WRITE_INTERVAL,
+            )
+            .values(last_seen_at=checked_at, expires_at=expires_at)
+            .returning(WebSession.id)
+            .execution_options(synchronize_session=False)
+        )
+        return expires_at if updated is not None else _as_utc(web_session.expires_at)
 
     def logout(
         self,
@@ -390,6 +463,7 @@ class WebAuthService:
                 .where(
                     WebSession.session_token_digest == session_digest,
                     WebSession.revoked_at.is_(None),
+                    WebSession.identity_digest == self.identity_digest,
                     WebSession.expires_at > revoked_at,
                     User.is_active.is_(True),
                 )
@@ -431,6 +505,7 @@ class WebAuthService:
                 .where(
                     WebSession.session_token_digest == session_digest,
                     WebSession.revoked_at.is_(None),
+                    WebSession.identity_digest == self.identity_digest,
                     WebSession.expires_at > checked_at,
                     User.is_active.is_(True),
                 )
@@ -443,19 +518,10 @@ class WebAuthService:
                     code="csrf_validation_failed",
                     safe_message="CSRF validation failed.",
                 )
-            session.execute(
-                update(WebSession)
-                .where(
-                    WebSession.id == web_session.id,
-                    WebSession.last_seen_at <= checked_at - LAST_SEEN_WRITE_INTERVAL,
-                )
-                .values(last_seen_at=checked_at)
-                .execution_options(synchronize_session=False)
-            )
             return AuthenticatedWebSession(
                 user=_web_user(web_session.user),
                 session_id=web_session.id,
-                expires_at=_as_utc(web_session.expires_at),
+                expires_at=self._touch(session, web_session, checked_at),
             )
 
     def reset_password(
@@ -465,6 +531,7 @@ class WebAuthService:
         new_password: str,
         now: datetime | None = None,
     ) -> None:
+        self.require_local_auth()
         normalized_username = normalize_username(username)
         validate_password(new_password)
         changed_at = _as_utc(now or datetime.now(UTC))
@@ -495,8 +562,18 @@ def create_web_auth_service(
     return WebAuthService(
         session_factory,
         setup_token=settings.web_setup_token.get_secret_value(),
+        identity_digest=(
+            token_digest(
+                "\n".join(
+                    (settings.ignite_issuer, settings.ignite_client_id, settings.ignite_admin_sub)
+                )
+            )
+            if settings.web_auth_mode == "ignite"
+            else None
+        ),
         allowed_origin=settings.web_allowed_origin,
         session_lifetime=timedelta(hours=settings.web_session_hours),
+        session_idle_timeout=timedelta(minutes=settings.web_session_idle_minutes),
         cookie_secure=settings.app_env == "production" or settings.web_cookie_secure,
         max_request_bytes=settings.web_auth_max_request_bytes,
         trusted_proxy_networks=settings.trusted_proxy_networks,

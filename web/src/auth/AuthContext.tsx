@@ -21,6 +21,7 @@ import { getStoredLocale, translate } from "../i18n";
 import type { User } from "../types";
 
 interface AuthState {
+  authMode: "local" | "ignite";
   loading: boolean;
   setupRequired: boolean;
   setupEnabled: boolean;
@@ -37,6 +38,7 @@ interface AuthState {
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: PropsWithChildren) {
+  const [authMode, setAuthMode] = useState<"local" | "ignite">("local");
   const [loading, setLoading] = useState(true);
   const [setupRequired, setSetupRequired] = useState(false);
   const [setupEnabled, setSetupEnabled] = useState(false);
@@ -49,6 +51,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     setBootstrapError(null);
     try {
       const setupStatus = await getSetupStatus();
+      setAuthMode(setupStatus.auth_mode ?? "local");
       setSetupRequired(setupStatus.setup_required);
       setSetupEnabled(setupStatus.setup_enabled);
       if (setupStatus.setup_required) {
@@ -109,6 +112,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const value = useMemo<AuthState>(
     () => ({
+      authMode,
       loading,
       setupRequired,
       setupEnabled,
@@ -122,6 +126,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       refresh,
     }),
     [
+      authMode,
       loading,
       setupRequired,
       setupEnabled,

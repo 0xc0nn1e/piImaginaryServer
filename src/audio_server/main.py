@@ -31,6 +31,7 @@ from audio_server.web_auth import (
     register_web_auth_error_handler,
 )
 from audio_server.web_auth import router as web_auth_router
+from audio_server.web_auth.oidc import IgniteClient
 
 
 def create_app(
@@ -79,6 +80,13 @@ def create_app(
     application.state.storage = active_storage
     application.state.authenticator = authenticator
     application.state.web_auth_service = web_auth_service
+    application.state.ignite_client = (
+        IgniteClient(
+            active_settings, active_database.session_factory, web_auth_service.identity_digest
+        )
+        if web_auth_service.identity_digest is not None
+        else None
+    )
     recording_service = RecordingService(
         session_factory=active_database.session_factory,
         storage=active_storage,
@@ -133,7 +141,7 @@ app = create_app()
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("audio_server.main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("audio_server.main:app", host="0.0.0.0", port=8000, access_log=False)
 
 
 def _validate_api_token(settings: Settings) -> None:

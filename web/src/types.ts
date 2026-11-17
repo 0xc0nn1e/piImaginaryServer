@@ -21,6 +21,7 @@ export interface User {
 }
 
 export interface SetupStatusResponse {
+  auth_mode: "local" | "ignite";
   setup_required: boolean;
   setup_enabled: boolean;
 }

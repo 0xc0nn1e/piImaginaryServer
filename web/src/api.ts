@@ -107,6 +107,10 @@ export async function login(username: string, password: string) {
   });
 }
 
+export function startIgniteLogin(): Promise<{ authorization_url: string }> {
+  return request("/api/v1/auth/oidc/login", { method: "POST" });
+}
+
 export function getSession(): Promise<SessionResponse> {
   return request("/api/v1/auth/me");
 }

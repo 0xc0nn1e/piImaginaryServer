@@ -25,9 +25,16 @@ class Settings(BaseSettings):
     storage_path: Path = Path("data")
     api_token: SecretStr = SecretStr("")
 
+    web_auth_mode: Literal["local", "ignite"] = "local"
+    ignite_issuer: str = ""
+    ignite_client_id: str = ""
+    ignite_client_secret: SecretStr = SecretStr("")
+    ignite_admin_sub: str = ""
+
     web_setup_token: SecretStr = SecretStr("")
     web_allowed_origin: str = "http://127.0.0.1:8000"
     web_session_hours: int = 12
+    web_session_idle_minutes: int = 120
     web_cookie_secure: bool = False
     web_auth_max_request_bytes: int = 4096
     web_login_max_attempts: int = 5
@@ -182,6 +189,7 @@ class Settings(BaseSettings):
         "ffmpeg_timeout_seconds",
         "whisper_cpu_threads",
         "web_session_hours",
+        "web_session_idle_minutes",
         "web_auth_max_request_bytes",
         "web_login_max_attempts",
         "web_login_window_seconds",
@@ -227,6 +235,22 @@ class Settings(BaseSettings):
         # The schema and interactive documentation are unauthenticated and sit
         # outside the /api/v1 request guard, so production never serves them
         # regardless of how DOCS_ENABLED is configured.
+        if self.web_auth_mode == "ignite":
+            if not all(
+                (
+                    self.ignite_issuer,
+                    self.ignite_client_id,
+                    self.ignite_client_secret.get_secret_value(),
+                    self.ignite_admin_sub,
+                )
+            ):
+                raise ValueError("Ignite requires issuer, client ID, client secret and admin sub")
+            if not _is_http_base_url(self.ignite_issuer):
+                raise ValueError("IGNITE_ISSUER must be an HTTP(S) URL without credentials")
+            if self.ignite_issuer.endswith("/"):
+                raise ValueError("IGNITE_ISSUER must not end with a slash")
+            if self.app_env == "production" and not self.ignite_issuer.startswith("https://"):
+                raise ValueError("IGNITE_ISSUER must use HTTPS in production")
         if self.app_env == "production":
             self.docs_enabled = False
         if self.job_lease_seconds <= self.job_heartbeat_seconds * 2:
